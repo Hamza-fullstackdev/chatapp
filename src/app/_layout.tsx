@@ -1,18 +1,61 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from 'expo-router';
-import * as SplashScreen from 'expo-splash-screen';
-import { useColorScheme } from 'react-native';
+import { Stack, DarkTheme, DefaultTheme, ThemeProvider } from 'expo-router';
+import { StatusBar } from 'expo-status-bar';
+import { ActivityIndicator, View } from 'react-native';
+import { AuthProvider, useAuth } from '@/context/auth-context';
+import { SocketProvider } from '@/context/socket-context';
+import { SyncProvider } from '@/context/sync-context';
+import { CallProvider } from '@/context/call-context';
+import { WaThemeProvider, useWaTheme } from '@/context/theme-context';
+import { NotificationsBridge } from '@/components/notifications-bridge';
 
-import { AnimatedSplashOverlay } from '@/components/animated-icon';
-import AppTabs from '@/components/app-tabs';
+function RootNavigator() {
+  const { status } = useAuth();
+  const { colors, dark } = useWaTheme();
 
-SplashScreen.preventAutoHideAsync();
+  const navTheme = dark
+    ? { ...DarkTheme, colors: { ...DarkTheme.colors, primary: colors.brand, background: colors.background, card: colors.background, text: colors.text } }
+    : { ...DefaultTheme, colors: { ...DefaultTheme.colors, primary: colors.brand, background: colors.background, card: colors.background, text: colors.text } };
 
-export default function TabLayout() {
-  const colorScheme = useColorScheme();
+  if (status === 'loading') {
+    return (
+      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.background }}>
+        <ActivityIndicator size="large" color={colors.brand} />
+      </View>
+    );
+  }
+
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <AnimatedSplashOverlay />
-      <AppTabs />
+    <ThemeProvider value={navTheme}>
+      <StatusBar style={dark ? 'light' : 'dark'} />
+      <NotificationsBridge />
+      <Stack screenOptions={{ headerShown: false }}>
+        <Stack.Protected guard={status === 'signedIn'}>
+          <Stack.Screen name="(tabs)" />
+          <Stack.Screen name="chat/[id]" />
+          <Stack.Screen name="chat/[id]/group-info" />
+          <Stack.Screen name="group/new" />
+          <Stack.Screen name="call/[id]" />
+        </Stack.Protected>
+        <Stack.Protected guard={status === 'signedOut'}>
+          <Stack.Screen name="(auth)" />
+        </Stack.Protected>
+      </Stack>
     </ThemeProvider>
+  );
+}
+
+export default function RootLayout() {
+  return (
+    <AuthProvider>
+      <SocketProvider>
+        <SyncProvider>
+          <CallProvider>
+            <WaThemeProvider>
+              <RootNavigator />
+            </WaThemeProvider>
+          </CallProvider>
+        </SyncProvider>
+      </SocketProvider>
+    </AuthProvider>
   );
 }

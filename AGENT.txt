@@ -1,0 +1,1462 @@
+You are a senior full-stack architect and engineer.
+
+I want you to build a production-quality WhatsApp-style mobile chat application with BOTH:
+
+1. Mobile frontend using Expo + React Native + TypeScript
+2. Backend using Node.js + Express + TypeScript
+
+IMPORTANT:
+Do NOT use Next.js for this project.
+Do NOT use MongoDB.
+The primary server database MUST be Supabase PostgreSQL.
+Supabase Storage MUST be used for media/files.
+
+The application must be designed as an OFFLINE-FIRST chat application.
+
+==================================================
+PRODUCT OVERVIEW
+==================================================
+
+Build a modern WhatsApp-style chat application where users can:
+
+- Login/logout (User Will Create Profile Using username & otp use 1234 by default we will add the sms functionality later)
+- Manage their profile
+- Search users
+- Send 1-to-1 messages
+- Create groups
+- Add/remove group members
+- Have multiple group admins
+- Admins can promote/demote other admins
+- Send text messages
+- Send emojis
+- Send GIFs
+- Send stickers
+- Send images
+- Send videos
+- Send documents/files
+- See online/offline status
+- See last seen
+- See typing indicators
+- See message sent/delivered/read status
+- Reply to messages
+- React to messages
+- Delete messages
+- Edit messages
+- Make voice calls
+- Receive incoming calls
+- See missed calls
+- Receive push notifications
+- Work properly when the device is temporarily offline
+
+The architecture must support future expansion for:
+
+- Video calls
+- Voice messages
+- Message forwarding
+- Message search
+- Message pinning
+- Message deletion for everyone
+- User blocking
+- Group permissions
+- End-to-end encryption
+- Multi-device support
+
+Do NOT implement all future features now, but design the architecture so they can be added later without major rewrites.
+
+==================================================
+CORE ARCHITECTURE
+==================================================
+
+Use this architecture:
+
+                EXPO MOBILE APP
+                       |
+          +------------+-------------+
+          |                          |
+        REST                    Socket.IO
+          |                          |
+          +------------+-------------+
+                       |
+                   NODE.JS
+                    EXPRESS
+                       |
+             +---------+---------+
+             |                   |
+          REDIS              SUPABASE
+                              |
+                    +---------+---------+
+                    |                   |
+                PostgreSQL           Storage
+
+
+Voice Calls:
+
+Expo
+ |
+WebRTC
+ |
+Socket.IO signaling
+ |
+STUN / TURN
+ |
+WebRTC audio connection
+
+==================================================
+TECHNOLOGY STACK
+==================================================
+
+MOBILE:
+
+- Expo
+- React Native
+- TypeScript
+- Expo Router
+- Zustand
+- TanStack Query
+- Expo SQLite
+- Socket.IO Client
+- React Native WebRTC
+- Expo SecureStore
+- Expo Image Picker
+- Expo Document Picker
+- Expo Notifications
+- Expo File System
+- @react-native-community/netinfo
+
+BACKEND:
+
+- Node.js
+- Express
+- TypeScript
+- Socket.IO
+- PostgreSQL
+- Supabase
+- Drizzle ORM
+- Redis
+- ioredis
+- Zod
+- JWT
+- bcrypt
+- Helmet
+- express-rate-limit
+
+STORAGE:
+
+- Supabase Storage
+
+VOICE:
+
+- WebRTC
+- react-native-webrtc
+- Socket.IO for signaling
+- STUN
+- TURN/coturn for production
+
+==================================================
+IMPORTANT ARCHITECTURAL RULE
+==================================================
+
+SQLite is NOT the central database.
+
+SQLite is LOCAL to each user's device.
+
+Supabase PostgreSQL is the permanent server-side source of truth.
+
+For example:
+
+User A:
+
+Expo
+ -> SQLite A
+ -> Socket.IO
+ -> Node.js
+ -> Supabase PostgreSQL
+
+User B:
+
+Node.js
+ -> Socket.IO
+ -> SQLite B
+ -> UI
+
+If User B is offline:
+
+User A
+ -> Node.js
+ -> PostgreSQL
+
+When B comes online:
+
+B
+ -> Sync API
+ -> Node.js
+ -> PostgreSQL
+ -> SQLite B
+ -> UI
+
+Never attempt to make one user's SQLite database communicate directly with another user's SQLite database.
+
+==================================================
+OFFLINE-FIRST ARCHITECTURE
+==================================================
+
+The application MUST be offline-first.
+
+SQLite should contain local copies of:
+
+- Users
+- Conversations
+- Conversation members
+- Messages
+- Message attachments
+- Message reactions
+- Local sync state
+- Sync queue
+
+The UI should primarily read from SQLite for chat screens.
+
+Do NOT make the chat screen wait for the network before displaying locally available messages.
+
+When the user sends a message:
+
+1. Generate a UUID on the mobile client.
+2. Insert the message into SQLite immediately.
+3. Display it optimistically.
+4. Add an operation to sync_queue.
+5. If online, synchronize immediately.
+6. If offline, keep the operation pending.
+7. When connectivity returns, synchronize automatically.
+
+Example:
+
+messages:
+
+id = UUID
+conversation_id
+sender_id
+client_message_id
+type
+text
+status
+created_at
+
+sync_queue:
+
+id
+operation
+entity_id
+payload
+status
+retry_count
+created_at
+
+==================================================
+SYNC SYSTEM
+==================================================
+
+Create a dedicated mobile SyncEngine.
+
+Suggested structure:
+
+services/
+  sync/
+    SyncEngine.ts
+    SyncQueue.ts
+    MessageSync.ts
+    ConversationSync.ts
+    SyncState.ts
+
+The SyncEngine must support:
+
+- Offline queueing
+- Batch synchronization
+- Retry
+- Exponential backoff
+- Idempotency
+- Duplicate protection
+- Upload/download synchronization
+- Connection recovery
+- Sync cursor
+- Partial failures
+
+Do NOT create one HTTP request per message if multiple messages are pending.
+
+Example:
+
+POST /api/sync
+
+{
+  "operations": [
+    {
+      "operation": "CREATE_MESSAGE",
+      "clientMessageId": "...",
+      "conversationId": "...",
+      "payload": {}
+    },
+    {
+      "operation": "CREATE_MESSAGE",
+      "clientMessageId": "...",
+      "conversationId": "...",
+      "payload": {}
+    }
+  ]
+}
+
+The server should process the batch safely using PostgreSQL transactions where appropriate.
+
+The synchronization API MUST be idempotent.
+
+A retry must never create duplicate messages.
+
+Use client-generated UUIDs / client_message_id with a unique database constraint.
+
+==================================================
+SYNC CURSOR
+==================================================
+
+Implement a reliable synchronization cursor.
+
+The client should remember something like:
+
+last_sync_cursor
+
+The server should return changes after that cursor.
+
+Example:
+
+GET /api/sync?cursor=1520
+
+Response:
+
+{
+  "cursor": 1532,
+  "changes": [...]
+}
+
+Do not repeatedly download the entire conversation history.
+
+==================================================
+REALTIME COMMUNICATION
+==================================================
+
+Use Socket.IO for realtime communication.
+
+Socket.IO should handle:
+
+- New messages
+- Message updates
+- Message deletion
+- Message reactions
+- Typing indicators
+- Online/offline presence
+- Last seen updates
+- Group changes
+- Message delivery status
+- Message read status
+- Call signaling
+- WebRTC SDP offers
+- WebRTC SDP answers
+- ICE candidates
+- Call accepted
+- Call rejected
+- Call ended
+
+Do NOT store typing indicators in PostgreSQL.
+
+Do NOT use Socket.IO as the permanent message database.
+
+For messages:
+
+Client
+ -> Socket.IO
+ -> Node.js
+ -> PostgreSQL
+ -> Socket.IO
+ -> recipients
+
+==================================================
+CONVERSATION ROOMS
+==================================================
+
+Use Socket.IO rooms.
+
+Example:
+
+conversation:{conversationId}
+
+When a user opens a conversation:
+
+socket.join(`conversation:${conversationId}`)
+
+When a message is created:
+
+io.to(`conversation:${conversationId}`).emit(...)
+
+Make sure users can only join conversations they are authorized to access.
+
+Never trust the mobile client regarding conversation membership.
+
+==================================================
+DATABASE
+==================================================
+
+Use Supabase PostgreSQL.
+
+Use Drizzle ORM.
+
+Create proper migrations.
+
+Suggested tables:
+
+users
+conversations
+conversation_members
+messages
+message_attachments
+message_reactions
+groups
+calls
+call_participants
+devices
+push_tokens
+
+You may combine or restructure tables if there is a strong architectural reason.
+
+==================================================
+USERS
+==================================================
+
+users:
+
+- id UUID
+- name
+- username
+- email
+- phone (optional)
+- avatar_url
+- bio
+- last_seen_at
+- created_at
+- updated_at
+
+Do not store plaintext passwords.
+
+Use bcrypt.
+
+==================================================
+CONVERSATIONS
+==================================================
+
+conversations:
+
+- id UUID
+- type: private | group
+- name
+- avatar_url
+- created_by
+- last_message_id
+- last_message_at
+- created_at
+- updated_at
+
+conversation_members:
+
+- conversation_id
+- user_id
+- role: member | admin
+- joined_at
+- muted
+- archived
+
+==================================================
+MESSAGES
+==================================================
+
+messages:
+
+- id UUID
+- conversation_id
+- sender_id
+- client_message_id UUID
+- type
+- text
+- reply_to
+- created_at
+- server_received_at
+- edited_at
+- deleted_at
+
+Message types:
+
+text
+image
+video
+audio
+file
+gif
+sticker
+
+Create a UNIQUE constraint/index on:
+
+client_message_id
+
+This is required for idempotent offline synchronization.
+
+Create proper indexes, especially:
+
+conversation_id + created_at
+
+sender_id
+
+client_message_id
+
+==================================================
+MESSAGE STATUS
+==================================================
+
+Support:
+
+pending
+syncing
+sent
+delivered
+read
+failed
+
+The local SQLite database may contain local-only statuses.
+
+Server-side delivery/read state should be persisted appropriately.
+
+==================================================
+GROUPS
+==================================================
+
+Users can:
+
+- Create group
+- Add users
+- Remove users
+- Leave group
+- Rename group
+- Change group image
+- Promote admin
+- Demote admin
+
+Only authorized admins can perform administrative operations.
+
+All authorization must be enforced on the Node.js backend.
+
+Never trust:
+
+role: "admin"
+
+sent from the mobile client.
+
+==================================================
+MEDIA
+==================================================
+
+Use Supabase Storage.
+
+Buckets:
+
+chat-media
+avatars
+stickers
+group-images
+
+Store files in structured paths such as:
+
+chat-media/{conversationId}/{messageId}/file
+
+avatars/{userId}/avatar
+
+stickers/{packId}/{stickerId}
+
+Do NOT store binary media inside PostgreSQL.
+
+PostgreSQL should store metadata:
+
+- storage_path
+- mime_type
+- size
+- width
+- height
+- duration
+- thumbnail_path
+
+The architecture should support direct uploads to Supabase Storage where appropriate.
+
+==================================================
+EMOJI
+==================================================
+
+Emoji should simply be Unicode text.
+
+Example:
+
+"Hello 👋 ❤️"
+
+No separate media upload is required.
+
+==================================================
+GIF
+==================================================
+
+Design GIF support using an external provider such as:
+
+GIPHY or Tenor.
+
+Do not download and permanently store every GIF in our own storage.
+
+Store:
+
+- provider
+- provider_id
+- preview URL
+- GIF URL
+- width
+- height
+
+==================================================
+STICKERS
+==================================================
+
+Design sticker packs.
+
+Sticker:
+
+- id
+- pack_id
+- name
+- storage_path
+- preview_path
+- type
+
+Support PNG/WebP initially.
+
+Design the schema so animated stickers can be added later.
+
+==================================================
+VOICE CALLING
+==================================================
+
+Implement one-to-one voice calling first.
+
+Use:
+
+react-native-webrtc
+
+Do NOT send actual voice data through Socket.IO.
+
+Socket.IO is ONLY the signaling channel.
+
+WebRTC handles actual audio.
+
+Call flow:
+
+Caller
+ -> Socket.IO
+ -> Node.js
+ -> Receiver
+
+Then:
+
+Caller
+ <---- WebRTC audio ---->
+Receiver
+
+Use Socket.IO for:
+
+call:initiate
+call:ringing
+call:accept
+call:reject
+call:offer
+call:answer
+call:ice-candidate
+call:end
+
+Implement:
+
+- Incoming call UI
+- Accept
+- Reject
+- Cancel
+- End
+- Mute microphone
+- Speaker toggle
+- Call duration
+- Missed call
+- Call history
+
+==================================================
+STUN / TURN
+==================================================
+
+Design WebRTC configuration using:
+
+STUN
+
+and production TURN.
+
+Use coturn for production TURN infrastructure.
+
+Do not hardcode TURN credentials in the mobile application.
+
+TURN credentials should be securely provided/configured.
+
+==================================================
+PUSH NOTIFICATIONS
+==================================================
+
+Use Expo Notifications.
+
+Store device push tokens.
+
+When the recipient is offline:
+
+New message
+ -> Node.js
+ -> Push notification
+
+Incoming call
+ -> Node.js
+ -> Push notification
+
+The system must determine whether the user currently has an active Socket.IO connection.
+
+==================================================
+PRESENCE
+==================================================
+
+Use Socket.IO + Redis.
+
+Support:
+
+online
+offline
+last seen
+typing
+
+Do not persist every typing event.
+
+Redis can be used for:
+
+- active socket mappings
+- presence
+- temporary state
+- distributed Socket.IO state
+- rate limiting
+
+==================================================
+REDIS
+==================================================
+
+Use ioredis.
+
+Design the system so multiple Node.js instances can eventually run simultaneously.
+
+Use the Socket.IO Redis adapter when horizontal scaling is introduced.
+
+Do not use Redis as the permanent message database.
+
+==================================================
+AUTHENTICATION
+==================================================
+
+Implement:
+
+- Register
+- Login
+- Logout
+- Refresh token
+- Current user
+- Change password
+
+Use:
+
+JWT
+bcrypt
+
+On mobile:
+
+Use Expo SecureStore for sensitive authentication credentials/tokens.
+
+Do not store sensitive tokens in plain AsyncStorage.
+
+==================================================
+API STRUCTURE
+==================================================
+
+Suggested routes:
+
+POST /api/auth/register
+POST /api/auth/login
+POST /api/auth/refresh
+POST /api/auth/logout
+GET  /api/auth/me
+
+GET /api/users
+GET /api/users/:id
+
+GET /api/conversations
+POST /api/conversations
+GET /api/conversations/:id
+
+GET /api/conversations/:id/messages
+POST /api/messages
+PATCH /api/messages/:id
+DELETE /api/messages/:id
+
+POST /api/groups
+PATCH /api/groups/:id
+POST /api/groups/:id/members
+DELETE /api/groups/:id/members/:userId
+
+POST /api/sync
+GET /api/sync
+
+GET /api/calls
+POST /api/calls
+
+==================================================
+SECURITY
+==================================================
+
+Implement:
+
+- Helmet
+- CORS
+- Rate limiting
+- Zod validation
+- Authentication middleware
+- Authorization middleware
+- Request validation
+- File size limits
+- MIME type validation
+- Secure storage policies
+- SQL injection protection through parameterized/ORM queries
+- Proper error handling
+
+Never trust client-provided:
+
+- user ID
+- sender ID
+- admin role
+- conversation membership
+- permissions
+
+Derive these from authenticated server-side state.
+
+==================================================
+MOBILE UI
+==================================================
+
+Build a polished modern messaging UI.
+
+Screens:
+
+Authentication:
+
+/login
+/register
+
+Main:
+
+/chats
+/calls
+/settings
+
+Chat:
+
+/chat/[conversationId]
+
+Group:
+
+/group/[groupId]
+
+Call:
+
+/call/[callId]
+
+Components:
+
+MessageBubble
+MessageInput
+TypingIndicator
+MessageStatus
+ChatHeader
+ConversationList
+UserAvatar
+MediaMessage
+ImageMessage
+VideoMessage
+FileMessage
+GifMessage
+StickerMessage
+ReactionPicker
+EmojiPicker
+AttachmentMenu
+IncomingCall
+ActiveCall
+CallControls
+
+The UI should feel like a modern production messaging application.
+
+Do not copy WhatsApp branding, logos, or proprietary visual assets.
+
+==================================================
+CHAT SCREEN BEHAVIOR
+==================================================
+
+When opening a chat:
+
+1. Load messages from SQLite immediately.
+2. Display them.
+3. Start/reconnect Socket.IO.
+4. Synchronize missing server messages.
+5. Update SQLite.
+6. UI automatically reflects SQLite changes.
+
+When sending:
+
+1. Generate UUID.
+2. Insert SQLite message.
+3. Show immediately.
+4. Add sync operation.
+5. Try realtime delivery if online.
+6. Mark sent after server acknowledgement.
+7. Mark delivered/read based on recipient state.
+
+==================================================
+MESSAGE PAGINATION
+==================================================
+
+Never load unlimited messages.
+
+Use cursor pagination.
+
+Example:
+
+GET /api/conversations/:id/messages?cursor=...&limit=30
+
+Initial load:
+latest 30 messages.
+
+When scrolling upward:
+load older messages.
+
+SQLite should also keep a reasonable local cache rather than unlimited history.
+
+Design a cleanup strategy that can be implemented later.
+
+==================================================
+ERROR HANDLING
+==================================================
+
+The mobile application must gracefully handle:
+
+- No internet
+- Slow internet
+- Socket disconnected
+- Socket reconnecting
+- Server unavailable
+- Supabase unavailable
+- Failed upload
+- Failed message sync
+- Duplicate sync request
+- Expired authentication
+- Failed voice call
+- TURN failure
+
+Never lose a locally created message because of a temporary network error.
+
+==================================================
+PROJECT STRUCTURE
+==================================================
+
+Create TWO separate applications:
+
+/mobile
+/server
+
+Mobile:
+
+mobile/
+  app/
+  components/
+  services/
+  stores/
+  db/
+  hooks/
+  utils/
+  types/
+  constants/
+
+Server:
+
+server/
+  src/
+    config/
+    controllers/
+    db/
+    middleware/
+    models/
+    routes/
+    services/
+    sockets/
+    utils/
+    validations/
+    types/
+
+==================================================
+DEVELOPMENT STRATEGY
+==================================================
+
+DO NOT attempt to implement everything in one giant step.
+
+Implement in phases.
+
+PHASE 1:
+Project setup
+Expo
+TypeScript
+Express
+TypeScript
+Supabase PostgreSQL
+Drizzle
+Environment variables
+
+PHASE 2:
+Authentication
+
+PHASE 3:
+Users and profiles
+
+PHASE 4:
+Private conversations
+
+PHASE 5:
+SQLite local database
+
+PHASE 6:
+Offline-first message creation
+
+PHASE 7:
+Sync engine
+
+PHASE 8:
+Socket.IO realtime messaging
+
+PHASE 9:
+Message sent/delivered/read
+
+PHASE 10:
+Typing and presence
+
+PHASE 11:
+Groups/admins
+
+PHASE 12:
+Media and Supabase Storage
+
+PHASE 13:
+Emoji/GIF/stickers
+
+PHASE 14:
+Push notifications
+
+PHASE 15:
+Voice calls/WebRTC
+
+PHASE 16:
+Redis scaling
+
+PHASE 17:
+Production hardening
+
+Do not move to the next phase until the current phase is working.
+
+==================================================
+IMPORTANT DEVELOPMENT RULES
+==================================================
+
+Before writing significant code:
+
+1. Inspect the existing project.
+2. Understand the current folder structure.
+3. Do not overwrite working code unnecessarily.
+4. Check package compatibility.
+5. Use current stable versions compatible with the installed Expo SDK.
+6. Prefer official/documented APIs.
+7. Do not invent package APIs.
+8. Keep frontend and backend strongly typed.
+9. Avoid unnecessary dependencies.
+10. Write reusable services instead of putting everything inside screens/controllers.
+11. Keep business logic out of React components.
+12. Keep database queries out of Socket.IO handlers where possible.
+13. Use service classes/functions.
+14. Add proper error handling.
+15. Add comments only where they explain non-obvious architecture.
+16. Do not create fake/mock implementations where a real implementation is expected.
+
+==================================================
+ENVIRONMENT VARIABLES
+==================================================
+
+Mobile should have only public/client-safe variables.
+
+Server should contain secrets:
+
+SUPABASE_URL
+SUPABASE_SERVICE_ROLE_KEY
+DATABASE_URL
+REDIS_URL
+JWT_SECRET
+JWT_REFRESH_SECRET
+TURN_SERVER_URL
+TURN_USERNAME
+TURN_CREDENTIAL_SECRET
+EXPO_ACCESS_TOKEN
+
+Never expose:
+
+SUPABASE_SERVICE_ROLE_KEY
+JWT secrets
+TURN secret
+database credentials
+
+to the mobile application.
+
+==================================================
+DATABASE MIGRATIONS
+==================================================
+
+Use Drizzle migrations.
+
+Create:
+
+schema
+migrations
+seed scripts
+
+Create development seed data for:
+
+- users
+- conversations
+- sample groups
+
+Do not put fake data into production automatically.
+
+==================================================
+TESTING
+==================================================
+
+Create tests for critical backend functionality.
+
+At minimum test:
+
+- Registration
+- Login
+- Authentication
+- Authorization
+- Conversation creation
+- Message creation
+- Duplicate message prevention
+- Offline sync
+- Sync retry
+- Group admin permissions
+
+The sync engine is especially important and should have automated tests.
+
+==================================================
+DELIVERABLE
+==================================================
+
+Build the application incrementally.
+
+At every phase:
+
+1. Explain what you are implementing.
+2. Inspect existing code before changing it.
+3. Implement the feature.
+4. Run TypeScript checks.
+5. Run linting.
+6. Run relevant tests.
+7. Fix errors.
+8. Summarize changed files.
+9. Explain how I can test the feature.
+
+Do not pretend a feature is implemented if it is only mocked.
+
+If a feature requires native Expo configuration, explicitly configure the required Expo plugin/development build.
+
+==================================================
+FIRST TASK
+==================================================
+
+Do NOT start by implementing the entire application.
+
+First:
+
+1. Analyze this specification.
+2. Propose the complete architecture.
+3. Propose the PostgreSQL schema.
+4. Propose the SQLite schema.
+5. Propose the synchronization protocol.
+6. Propose Socket.IO events.
+7. Propose WebRTC signaling events.
+8. Propose the mobile folder structure.
+9. Propose the backend folder structure.
+10. List all required packages.
+11. Identify any package compatibility concerns with the current Expo SDK.
+12. Then wait for approval before implementing Phase 1.
+
+The most important goals are:
+
+- Offline-first UX
+- Reliable message synchronization
+- No duplicate messages
+- Realtime communication
+- Scalable PostgreSQL architecture
+- Secure backend
+- Clean TypeScript architecture
+- Production-ready foundation
+
+
+TypeScript + SQL Database Requirements
+
+The entire project must be TypeScript-first.
+
+TypeScript
+Both /mobile and /server must use TypeScript.
+Do not create .js, .jsx, .mjs, or .cjs source files unless a configuration file absolutely requires it.
+Enable strict TypeScript configuration:
+"strict": true
+proper type checking
+no unnecessary any
+Define shared types/interfaces for:
+Users
+Conversations
+Groups
+Messages
+Attachments
+Reactions
+Calls
+Sync operations
+Socket events
+API responses/errors
+Keep backend business logic, controllers, services, repositories, Socket.IO handlers, validation schemas, and utilities strongly typed.
+SQL Files Are Mandatory
+
+Do not rely exclusively on Drizzle ORM schema definitions.
+
+The project must contain actual .sql files for both PostgreSQL and SQLite.
+
+Recommended structure:
+
+/server
+  database/
+    postgres/
+      migrations/
+        001_create_users.sql
+        002_create_conversations.sql
+        003_create_conversation_members.sql
+        004_create_messages.sql
+        005_create_attachments.sql
+        006_create_reactions.sql
+        007_create_calls.sql
+        008_create_devices.sql
+        009_create_sync_metadata.sql
+
+      seeds/
+        001_seed_users.sql
+        002_seed_conversations.sql
+        003_seed_messages.sql
+        004_seed_groups.sql
+
+      schema.sql
+
+    sqlite/
+      migrations/
+        001_create_users.sql
+        002_create_conversations.sql
+        003_create_conversation_members.sql
+        004_create_messages.sql
+        005_create_attachments.sql
+        006_create_reactions.sql
+        007_create_sync_queue.sql
+        008_create_sync_state.sql
+
+      seeds/
+        001_seed_users.sql
+        002_seed_conversations.sql
+        003_seed_messages.sql
+        004_seed_groups.sql
+
+      schema.sql
+PostgreSQL Requirements
+
+PostgreSQL is the permanent server source of truth.
+
+The PostgreSQL SQL schema must include appropriate:
+
+Primary keys
+Foreign keys
+UUIDs
+Unique constraints
+NOT NULL constraints
+CHECK constraints where useful
+Indexes
+created_at / updated_at
+Soft-delete fields where appropriate
+Cascading behavior where appropriate
+
+At minimum create tables for:
+
+users
+conversations
+conversation_members
+messages
+message_attachments
+message_reactions
+devices
+calls
+call_participants
+push_tokens
+
+The SQL migrations must be re-runnable safely where practical and must have a clear migration order.
+
+SQLite Requirements
+
+SQLite is the local mobile/offline database.
+
+The SQLite schema must support:
+
+users
+conversations
+conversation_members
+messages
+message_attachments
+message_reactions
+sync_queue
+sync_state
+
+The SQLite database must support the offline-first architecture:
+
+Mobile UI
+   ↓
+SQLite
+   ↓
+Sync Queue
+   ↓
+Node.js API / Socket.IO
+   ↓
+PostgreSQL
+
+SQLite must contain enough information to render the user's chats while offline.
+
+Seed Data
+
+Create realistic development seed data for both PostgreSQL and SQLite.
+
+Do not leave the databases completely empty after setup.
+
+Seed PostgreSQL with development data such as:
+
+5–10 users
+2–3 private conversations
+2 group conversations
+group members with different roles
+20–50 messages
+some replies
+some reactions
+sample attachments metadata
+sample device/session data
+
+Include examples for:
+
+Normal text messages
+Emoji messages
+Group messages
+Reply messages
+Messages from multiple users
+Different message statuses
+Admin/member roles
+
+For SQLite, create a smaller representative dataset that allows the mobile application to immediately demonstrate:
+
+Chat list
+Private chat
+Group chat
+Messages
+Replies
+Reactions
+Offline UI
+Pending sync operations
+Important Seed Rules
+
+Seed data must be clearly marked as development/demo data.
+
+Never hardcode real credentials or production secrets.
+
+If seeded users require passwords, hash them using the same password-hashing mechanism used by the backend rather than storing plaintext passwords.
+
+Document exactly how to:
+
+# Run PostgreSQL migrations
+npm run db:migrate
+
+# Seed PostgreSQL
+npm run db:seed
+
+# Reset PostgreSQL
+npm run db:reset
+
+And provide equivalent commands/scripts for SQLite.
+
+ORM + SQL Relationship
+
+Use Drizzle ORM for normal TypeScript database operations.
+
+However:
+
+The SQL files are the authoritative database initialization/migration artifacts and must remain committed to the repository.
+
+Drizzle schemas should remain synchronized with the SQL schema.
+
+If Drizzle migrations are generated, do not create conflicting duplicate migration systems. Choose and document one clear migration workflow while still keeping the required human-readable .sql migration files in the repository.
+
+Database Documentation
+
+Create:
+
+/docs/database.md
+/docs/offline-sync.md
+/docs/architecture.md
+
+database.md should explain:
+
+PostgreSQL schema
+SQLite schema
+Relationships
+Indexes
+Migration process
+Seed process
+PostgreSQL vs SQLite responsibilities
+
+offline-sync.md should explain:
+
+Local writes
+Sync queue
+Batch synchronization
+Retry mechanism
+Idempotency
+Client-generated IDs
+Sync cursor
+Conflict handling
+Reconnection behavior
+
+
+Do not start implementing features until the database architecture, PostgreSQL SQL schema, SQLite SQL schema, seed strategy, and migration strategy have been reviewed and agreed upon. Database structure must not be casually changed later without checking its impact on offline sync, Socket.IO events, API contracts, and mobile SQLite.
