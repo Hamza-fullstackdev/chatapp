@@ -47,7 +47,10 @@ export function MessageActionsSheet({
               <Pressable
                 key={emoji}
                 hitSlop={6}
-                onPress={() => onReact(emoji)}
+                onPress={() => {
+                  onReact(emoji);
+                  onClose();
+                }}
                 style={[
                   styles.emojiBtn,
                   ownReactions.has(emoji) && { backgroundColor: colors.brandLight },

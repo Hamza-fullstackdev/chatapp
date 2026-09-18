@@ -2,9 +2,12 @@ import { Alert, KeyboardAvoidingView, Pressable, ScrollView, StyleSheet, Text, T
 import { useState } from 'react';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { Image } from 'expo-image';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useWaTheme } from '@/context/theme-context';
 import { authApi } from '@/lib/api';
+import { setAuthToken } from '@/lib/api-client';
+import { pickAvatarImage, uploadAvatar, type LocalUploadSource } from '@/lib/media';
 
 export default function RegisterScreen() {
   const { colors, dark } = useWaTheme();
@@ -12,7 +15,13 @@ export default function RegisterScreen() {
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
   const [code, setCode] = useState('1234');
+  const [avatarDraft, setAvatarDraft] = useState<LocalUploadSource | null>(null);
   const [busy, setBusy] = useState(false);
+
+  const pickAvatar = async () => {
+    const source = await pickAvatarImage();
+    if (source) setAvatarDraft(source);
+  };
 
   const submit = async () => {
     if (busy) return;
@@ -22,12 +31,27 @@ export default function RegisterScreen() {
     }
     setBusy(true);
     try {
-      await authApi.register({
+      const result = await authApi.register({
         name: name.trim(),
         username: username.trim(),
         code: code.trim() || '1234',
         email: email.trim() || undefined,
       });
+      // The upload needs an authenticated token; the account now exists so we
+      // can push the photo to the avatars bucket and patch the profile. This
+      // must never block account creation if transiently fails.
+      if (avatarDraft) {
+        setAuthToken(result.token);
+        try {
+          const avatarUrl = await uploadAvatar(avatarDraft);
+          await authApi.updateMe({ avatarUrl });
+        } catch {
+          Alert.alert(
+            'Photo upload failed',
+            'Your account was created. You can add a profile photo later from Settings.',
+          );
+        }
+      }
       router.replace('/login');
     } catch (e) {
       Alert.alert('Registration failed', e instanceof Error ? e.message : 'Could not create account');
@@ -45,10 +69,23 @@ export default function RegisterScreen() {
               <Ionicons name="arrow-back" size={24} color="#FFFFFF" />
             </Pressable>
             <View style={styles.logoWrap}>
-              <Ionicons name="person-add" size={56} color="#FFFFFF" />
+              <Image source={require('@/assets/images/launcher.png')} style={styles.logo} contentFit="cover" />
             </View>
             <Text style={styles.title}>Create your profile</Text>
             <Text style={styles.subtitle}>You will use your username + code to sign in.</Text>
+            <Pressable onPress={pickAvatar} style={styles.avatarPicker} hitSlop={10}>
+              {avatarDraft ? (
+                <Image source={{ uri: avatarDraft.uri }} style={styles.avatarPick} contentFit="cover" />
+              ) : (
+                <View style={[styles.avatarPick, styles.avatarPlaceholder]}>
+                  <Ionicons name="person-add-outline" size={34} color="rgba(255,255,255,0.9)" />
+                </View>
+              )}
+              <View style={[styles.avatarBadge, { backgroundColor: colors.brand, borderColor: dark ? colors.background : '#0A6C5B' }]}>
+                <Ionicons name="camera" size={15} color="#FFFFFF" />
+              </View>
+            </Pressable>
+            <Text style={styles.avatarHint}>Add a profile photo (optional)</Text>
           </View>
 
           <View style={[styles.card, { backgroundColor: dark ? colors.backgroundSecondary : '#FFFFFF' }]}>
@@ -152,9 +189,15 @@ const styles = StyleSheet.create({
     height: 104,
     borderRadius: 52,
     backgroundColor: 'rgba(255,255,255,0.22)',
+    overflow: 'hidden',
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 14,
+  },
+  logo: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 52,
   },
   title: {
     fontSize: 22,
@@ -165,6 +208,42 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: 'rgba(255,255,255,0.85)',
     marginTop: 6,
+    textAlign: 'center',
+  },
+  avatarPicker: {
+    width: 92,
+    height: 92,
+    borderRadius: 46,
+    backgroundColor: 'rgba(255,255,255,0.22)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 16,
+  },
+  avatarPick: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 46,
+  },
+  avatarPlaceholder: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  avatarBadge: {
+    position: 'absolute',
+    right: 0,
+    bottom: 0,
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2.5,
+    borderColor: '#0A6C5B',
+  },
+  avatarHint: {
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: 12,
+    marginTop: 8,
     textAlign: 'center',
   },
   card: {

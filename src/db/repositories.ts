@@ -51,6 +51,7 @@ type ConversationRow = {
   last_message_text: string | null;
   last_message_sender_id: string | null;
   last_message_created_at: string | null;
+  last_message_status: string | null;
   last_message_has_attachments: number;
   unread_count: number;
   updated_at: string | null;
@@ -73,6 +74,7 @@ function rowToConversation(row: ConversationRow): ConversationDTO {
           type: row.last_message_type ?? 'text',
           text: row.last_message_text,
           senderId: row.last_message_sender_id ?? '',
+          status: row.last_message_status ?? 'sent',
           createdAt: row.last_message_created_at ?? '',
           hasAttachments: row.last_message_has_attachments === 1,
         }
@@ -87,8 +89,8 @@ export async function upsertConversation(db: SQLiteDatabase, c: ConversationDTO)
     `INSERT INTO conversations (
       id, type, name, avatar_url, other_user_id, other_user_name, other_user_avatar_url,
       last_message_id, last_message_type, last_message_text, last_message_sender_id,
-      last_message_created_at, last_message_has_attachments, unread_count, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      last_message_status, last_message_created_at, last_message_has_attachments, unread_count, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       type = excluded.type,
       name = excluded.name,
@@ -100,6 +102,7 @@ export async function upsertConversation(db: SQLiteDatabase, c: ConversationDTO)
       last_message_type = excluded.last_message_type,
       last_message_text = excluded.last_message_text,
       last_message_sender_id = excluded.last_message_sender_id,
+      last_message_status = excluded.last_message_status,
       last_message_created_at = excluded.last_message_created_at,
       last_message_has_attachments = excluded.last_message_has_attachments,
       unread_count = excluded.unread_count,
@@ -115,11 +118,24 @@ export async function upsertConversation(db: SQLiteDatabase, c: ConversationDTO)
     c.lastMessage?.type ?? null,
     c.lastMessage?.text ?? null,
     c.lastMessage?.senderId ?? null,
+    c.lastMessage?.status ?? null,
     c.lastMessage?.createdAt ?? null,
     c.lastMessage?.hasAttachments ? 1 : 0,
     c.unreadCount ?? 0,
     c.updatedAt,
   );
+}
+
+export async function deleteConversationsLocal(db: SQLiteDatabase, ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const placeholders = ids.map(() => '?').join(', ');
+  await db.runAsync(`DELETE FROM conversations WHERE id IN (${placeholders})`, ...ids);
+}
+
+export async function deleteMessagesLocal(db: SQLiteDatabase, ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const placeholders = ids.map(() => '?').join(', ');
+  await db.runAsync(`DELETE FROM messages WHERE id IN (${placeholders})`, ...ids);
 }
 
 export async function listConversations(db: SQLiteDatabase): Promise<ConversationDTO[]> {

@@ -55,6 +55,7 @@ export interface LastMessageDTO {
   type: string;
   text: string | null;
   senderId: string;
+  status: string | null;
   createdAt: string;
   hasAttachments: boolean;
 }

@@ -17,7 +17,14 @@ export default function TabsLayout() {
         headerTitleStyle: { fontWeight: '600' },
         tabBarActiveTintColor: colors.brand,
         tabBarInactiveTintColor: dark ? colors.textSecondary : '#54656F',
-        tabBarStyle: { backgroundColor: dark ? colors.background : '#FFFFFF' },
+        tabBarStyle: {
+          backgroundColor: dark ? colors.background : '#FFFFFF',
+          height: 64,
+          paddingTop: 6,
+          borderTopWidth: 0.5,
+          borderTopColor: dark ? colors.divider : '#DADDE1',
+        },
+        tabBarLabelStyle: { fontSize: 11, fontWeight: '500' },
         sceneStyle: { backgroundColor: colors.backgroundSecondary },
       }}
     >

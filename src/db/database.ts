@@ -41,6 +41,7 @@ const TABLE_DDL: string[] = [
     last_message_type TEXT,
     last_message_text TEXT,
     last_message_sender_id TEXT,
+    last_message_status TEXT,
     last_message_created_at TEXT,
     last_message_has_attachments INTEGER NOT NULL DEFAULT 0,
     unread_count INTEGER NOT NULL DEFAULT 0,
@@ -186,7 +187,13 @@ async function migrationV2(db: SQLite.SQLiteDatabase): Promise<void> {
   for (const ddl of INDEX_DDL) await db.execAsync(ddl);
 }
 
-const MIGRATIONS: MigrationStep[] = [MIGRATION_V1, migrationV2];
+async function migrationV3(db: SQLite.SQLiteDatabase): Promise<void> {
+  await ensureColumns(db, 'conversations', [
+    ['last_message_status', 'TEXT'],
+  ]);
+}
+
+const MIGRATIONS: MigrationStep[] = [MIGRATION_V1, migrationV2, migrationV3];
 
 async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
   const row = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version');

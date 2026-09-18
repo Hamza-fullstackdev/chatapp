@@ -1,11 +1,13 @@
 import { useState } from 'react';
-import { KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '@/context/auth-context';
 import { useWaTheme } from '@/context/theme-context';
 import { Avatar } from '@/components/avatar';
 import { formatLastSeen } from '@/lib/format';
 import { authApi } from '@/lib/api';
+import { pickAvatarImage, uploadAvatar, type LocalUploadSource } from '@/lib/media';
+import { resetDatabase } from '@/db/database';
 
 export default function SettingsScreen() {
   const { user, signOut, updateUser } = useAuth();
@@ -13,26 +15,62 @@ export default function SettingsScreen() {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState('');
   const [bio, setBio] = useState('');
+  const [avatarDraft, setAvatarDraft] = useState<LocalUploadSource | null>(null);
   const [saving, setSaving] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleteText, setDeleteText] = useState('');
+  const [deleting, setDeleting] = useState(false);
 
   if (!user) return null;
 
   const openEditor = () => {
     setName(user.name);
     setBio(user.bio ?? '');
+    setAvatarDraft(null);
     setEditing(true);
+  };
+
+  const pickAvatar = async () => {
+    const source = await pickAvatarImage();
+    if (source) setAvatarDraft(source);
   };
 
   const saveProfile = async () => {
     if (!name.trim() || saving) return;
     setSaving(true);
     try {
-      const updated = await authApi.updateMe({ name: name.trim(), bio: bio.trim() || null });
+      let avatarUrl: string | undefined;
+      if (avatarDraft) {
+        avatarUrl = await uploadAvatar(avatarDraft);
+      }
+      const updated = await authApi.updateMe({
+        name: name.trim(),
+        bio: bio.trim() || null,
+        avatarUrl,
+      });
       updateUser(updated);
       setEditing(false);
-    } catch {
+    } catch (e) {
+      Alert.alert('Save failed', e instanceof Error ? e.message : 'Could not save your profile');
+    } finally {
       setSaving(false);
     }
+  };
+
+  const deleteAccount = async () => {
+    if (deleteText.trim().toUpperCase() !== 'DELETE' || deleting) return;
+    setDeleting(true);
+    try {
+      await authApi.deleteAccount();
+    } catch (e) {
+      setDeleting(false);
+      setConfirmingDelete(false);
+      setDeleteText('');
+      Alert.alert('Delete failed', e instanceof Error ? e.message : 'Could not delete your account');
+      return;
+    }
+    await resetDatabase().catch(() => undefined);
+    await signOut();
   };
 
   return (
@@ -81,6 +119,23 @@ export default function SettingsScreen() {
         <Text style={styles.logoutText}>Sign out</Text>
       </Pressable>
 
+      <Pressable
+        onPress={() => {
+          setDeleteText('');
+          setConfirmingDelete(true);
+        }}
+        style={({ pressed }) => [
+          styles.deleteAccount,
+          { backgroundColor: pressed ? colors.divider : colors.backgroundSecondary },
+        ]}
+      >
+        <Ionicons name="trash-outline" size={20} color="#E5423D" />
+        <Text style={styles.logoutText}>Delete account</Text>
+      </Pressable>
+      <Text style={[styles.deleteHint, { color: colors.textSecondary }]}>
+        Permanently deletes your account, profile, chats and media.
+      </Text>
+
       <Modal visible={editing} transparent animationType="fade" onRequestClose={() => setEditing(false)}>
         <KeyboardAvoidingView
           style={styles.modalOverlay}
@@ -88,6 +143,12 @@ export default function SettingsScreen() {
         >
           <View style={[styles.modalCard, { backgroundColor: colors.backgroundSecondary }]}>
             <Text style={[styles.modalTitle, { color: colors.text }]}>Edit profile</Text>
+            <Pressable onPress={pickAvatar} style={styles.avatarPicker}>
+              <Avatar name={user.name} uri={avatarDraft?.uri ?? user.avatarUrl} size={84} />
+              <View style={[styles.avatarBadge, { backgroundColor: colors.brand }]}>
+                <Ionicons name="camera" size={16} color="#FFFFFF" />
+              </View>
+            </Pressable>
             <TextInput
               value={name}
               onChangeText={setName}
@@ -120,6 +181,57 @@ export default function SettingsScreen() {
                 ]}
               >
                 <Text style={styles.saveText}>{saving ? 'Saving…' : 'Save'}</Text>
+              </Pressable>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      <Modal
+        visible={confirmingDelete}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          if (!deleting) setConfirmingDelete(false);
+        }}
+      >
+        <KeyboardAvoidingView
+          style={styles.modalOverlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+          <View style={[styles.modalCard, { backgroundColor: colors.backgroundSecondary }]}>
+            <Text style={[styles.modalTitle, { color: colors.text }]}>Delete account?</Text>
+            <Text style={[styles.deleteBody, { color: colors.textSecondary }]}>
+              This permanently deletes your account, profile, messages and media. This cannot be
+              undone. Type DELETE to confirm.
+            </Text>
+            <TextInput
+              value={deleteText}
+              onChangeText={setDeleteText}
+              editable={!deleting}
+              placeholder="DELETE"
+              autoCapitalize="characters"
+              placeholderTextColor={colors.textSecondary}
+              style={[styles.modalInput, { color: colors.text, backgroundColor: colors.divider }]}
+            />
+            <View style={styles.modalActions}>
+              <Pressable
+                onPress={() => setConfirmingDelete(false)}
+                disabled={deleting}
+                style={({ pressed }) => [styles.modalBtn, { backgroundColor: pressed ? colors.divider : colors.incomingBubble }]}
+              >
+                <Text style={{ color: colors.text }}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                onPress={deleteAccount}
+                disabled={deleteText.trim().toUpperCase() !== 'DELETE' || deleting}
+                style={({ pressed }) => [
+                  styles.modalBtn,
+                  { backgroundColor: pressed ? '#D32F2F' : '#E5423D' },
+                  (deleteText.trim().toUpperCase() !== 'DELETE' || deleting) && styles.buttonBusy,
+                ]}
+              >
+                <Text style={styles.deleteAction}>{deleting ? 'Deleting…' : 'Delete'}</Text>
               </Pressable>
             </View>
           </View>
@@ -192,6 +304,30 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     paddingVertical: 14,
     gap: 8,
+    marginTop: 4,
+  },
+  deleteAccount: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 12,
+    paddingVertical: 14,
+    gap: 8,
+    marginTop: 10,
+  },
+  deleteHint: {
+    fontSize: 12,
+    textAlign: 'center',
+    marginTop: 8,
+  },
+  deleteBody: {
+    fontSize: 14,
+    lineHeight: 20,
+    marginBottom: 14,
+  },
+  deleteAction: {
+    color: '#FFFFFF',
+    fontWeight: '600',
   },
   logoutText: {
     color: '#E5423D',
@@ -228,6 +364,22 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '700',
     marginBottom: 14,
+  },
+  avatarPicker: {
+    alignSelf: 'center',
+    marginBottom: 14,
+  },
+  avatarBadge: {
+    position: 'absolute',
+    right: -2,
+    bottom: -2,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
   },
   modalInput: {
     borderRadius: 10,

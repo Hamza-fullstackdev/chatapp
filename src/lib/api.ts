@@ -55,13 +55,16 @@ export const authApi = {
     phone?: string | null;
     avatarUrl?: string | null;
   }): Promise<UserDTO> {
-    return http.put<UserDTO>('/api/auth/me', input);
+    return http.patch<UserDTO>('/api/auth/me', input);
   },
   changePassword(currentPassword: string, newPassword: string): Promise<{ ok: boolean }> {
     return http.post<{ ok: boolean }>('/api/auth/password', {
       currentPassword,
       newPassword,
     });
+  },
+  deleteAccount(): Promise<{ ok: boolean }> {
+    return http.delete<{ ok: boolean }>('/api/users/me');
   },
 };
 
@@ -94,6 +97,9 @@ export const conversationsApi = {
   markRead(id: string): Promise<{ ok: boolean }> {
     return http.post<{ ok: boolean }>(`/api/conversations/${id}/read`);
   },
+  remove(conversationIds: string[]): Promise<{ deletedIds: string[] }> {
+    return http.post<{ deletedIds: string[] }>('/api/conversations/bulk-delete', { conversationIds });
+  },
 };
 
 export const messagesApi = {
@@ -125,6 +131,9 @@ export const messagesApi = {
     return http.delete<{ id: string; conversationId: string; deletedAt: string }>(
       `/api/messages/${messageId}`,
     );
+  },
+  deleteMany(messageIds: string[]): Promise<{ deletedIds: string[] }> {
+    return http.post<{ deletedIds: string[] }>('/api/messages/bulk-delete', { messageIds });
   },
   toggleReaction(messageId: string, emoji: string): Promise<{ reactions: ReactionDTO[] }> {
     return http.post<{ reactions: ReactionDTO[] }>(`/api/messages/${messageId}/reactions`, { emoji });

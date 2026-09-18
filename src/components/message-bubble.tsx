@@ -1,11 +1,14 @@
-import { useEffect, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { useEffect, useMemo, useState } from 'react';
+import { ActivityIndicator, Animated, PanResponder, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import type { AttachmentDTO, MessageDTO } from '@/types/api';
 import { formatMessageTime } from '@/lib/format';
 import { useWaTheme } from '@/context/theme-context';
 import { getAttachmentUrl } from '@/lib/media';
+
+const REPLY_SWIPE_THRESHOLD = 56;
+const REPLY_SWIPE_MAX_SHIFT = 64;
 
 interface MessageBubbleProps {
   message: MessageDTO;
@@ -16,17 +19,26 @@ interface MessageBubbleProps {
   onFailedRetry?: () => void;
   onLongPress?: (message: MessageDTO) => void;
   onOpenMedia?: (attachment: AttachmentDTO) => void;
+  onPress?: (message: MessageDTO) => void;
+  onSwipeToReply?: (message: MessageDTO) => void;
+  selecting?: boolean;
+  selected?: boolean;
+  highlighted?: boolean;
 }
 
 /**
  * Delivery tick, WhatsApp-style:
- *  - single grey check  = sent
- *  - double grey check  = delivered to the other device
- *  - double blue check  = read
+ *  - clock         = pending (uploading / in the offline queue)
+ *  - single grey ✓ = sent
+ *  - double grey ✓✓ = delivered to the other device
+ *  - double blue ✓✓ = read
  */
 function Tick({ status }: { status: string }) {
   if (status === 'failed') {
     return <Ionicons name="alert-circle" size={16} color="#E5423D" />;
+  }
+  if (status === 'pending' || status === 'syncing') {
+    return <Ionicons name="time" size={13} color="#88929E" />;
   }
   if (status === 'read') {
     return <Ionicons name="checkmark-done" size={14} color="#34B7F1" />;
@@ -35,6 +47,28 @@ function Tick({ status }: { status: string }) {
     return <Ionicons name="checkmark-done" size={14} color="#88929E" />;
   }
   return <Ionicons name="checkmark" size={14} color="#88929E" />;
+}
+
+/**
+ * Status indicator overlaid on the photo corner: a progress spinner while the
+ * media is uploading/delivering, a retry-able alert on failure, otherwise the
+ * normal delivery tick.
+ */
+function MediaStatus({ status, onRetry }: { status: string; onRetry?: () => void }) {
+  if (status === 'failed') {
+    const icon = <Ionicons name="alert-circle" size={14} color="#FFE3E1" />;
+    return onRetry ? (
+      <Pressable hitSlop={8} onPress={onRetry} style={styles.tick}>
+        {icon}
+      </Pressable>
+    ) : (
+      icon
+    );
+  }
+  if (status === 'pending' || status === 'syncing') {
+    return <ActivityIndicator size="small" color="#FFFFFF" />;
+  }
+  return <Tick status={status} />;
 }
 
 function AttachmentMedia({ attachment, isOwn }: { attachment: AttachmentDTO; isOwn: boolean }) {
@@ -88,8 +122,46 @@ export function MessageBubble({
   onFailedRetry,
   onLongPress,
   onOpenMedia,
+  onPress,
+  onSwipeToReply,
+  selecting = false,
+  selected = false,
+  highlighted = false,
 }: MessageBubbleProps) {
   const { colors } = useWaTheme();
+
+  const swipeEnabled = !!onSwipeToReply && !selecting && !message.deletedAt;
+  const [translateX] = useState(() => new Animated.Value(0));
+
+  const swipeResponder = useMemo(() => {
+    const springBack = () => {
+      Animated.spring(translateX, {
+        toValue: 0,
+        useNativeDriver: true,
+        friction: 7,
+        tension: 60,
+      }).start();
+    };
+    return PanResponder.create({
+      onMoveShouldSetPanResponder: (_event, gesture) =>
+        swipeEnabled && Math.abs(gesture.dx) > 12 && Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.4,
+      onPanResponderGrant: () => {
+        translateX.setValue(0);
+      },
+      onPanResponderMove: (_event, gesture) => {
+        translateX.setValue(Math.max(0, Math.min(gesture.dx, REPLY_SWIPE_MAX_SHIFT)));
+      },
+      onPanResponderRelease: (_event, gesture) => {
+        const triggered = gesture.dx > REPLY_SWIPE_THRESHOLD;
+        springBack();
+        if (triggered) onSwipeToReply?.(message);
+      },
+      onPanResponderTerminate: () => {
+        springBack();
+      },
+      onPanResponderTerminationRequest: () => false,
+    });
+  }, [swipeEnabled, translateX, onSwipeToReply, message]);
 
   const images = message.attachments.filter((a) => a.type === 'image' || a.type === 'gif');
   const stickers = message.attachments.filter((a) => a.type === 'sticker');
@@ -99,25 +171,34 @@ export function MessageBubble({
   // corner like WhatsApp instead of a separate row underneath it.
   const overlayTime = images.length > 0 && !message.text && message.reactions.length === 0 && !message.editedAt;
 
+  const hasReactions = message.reactions.length > 0 && !message.deletedAt;
+
+  const reactionsOverlay =
+    hasReactions ? (
+      <View
+        style={[
+          styles.reactionsOverlay,
+          isOwn ? styles.reactionsOwn : styles.reactionsIncoming,
+        ]}
+      >
+        {Object.entries(
+          message.reactions.reduce<Record<string, number>>((acc, r) => {
+            acc[r.emoji] = (acc[r.emoji] ?? 0) + 1;
+            return acc;
+          }, {}),
+        ).map(([emoji, count]) => (
+          <View key={emoji} style={styles.reactionPill}>
+            <Text style={styles.reactionEmoji}>{emoji}</Text>
+            {count > 1 && <Text style={[styles.reactionCount, { color: colors.textSecondary }]}>{count}</Text>}
+          </View>
+        ))}
+      </View>
+    ) : null;
+
   const metaRow = (
     <View style={styles.metaRow}>
       {message.editedAt && !message.deletedAt ? (
         <Text style={[styles.edited, { color: colors.textSecondary }]}>edited</Text>
-      ) : null}
-      {message.reactions.length > 0 && !message.deletedAt ? (
-        <View style={styles.reactionPills}>
-          {Object.entries(
-            message.reactions.reduce<Record<string, number>>((acc, r) => {
-              acc[r.emoji] = (acc[r.emoji] ?? 0) + 1;
-              return acc;
-            }, {}),
-          ).map(([emoji, count]) => (
-            <View key={emoji} style={styles.reactionPill}>
-              <Text style={styles.reactionEmoji}>{emoji}</Text>
-              {count > 1 && <Text style={[styles.reactionCount, { color: colors.textSecondary }]}>{count}</Text>}
-            </View>
-          ))}
-        </View>
       ) : null}
       <Text style={[styles.time, { color: colors.textSecondary }]}>{formatMessageTime(message.createdAt)}</Text>
       {isOwn && message.status === 'failed' && onFailedRetry ? (
@@ -136,10 +217,15 @@ export function MessageBubble({
     list.map((a, index) => {
       const isLast = index === list.length - 1;
       const media = <AttachmentMedia key={a.id} attachment={a} isOwn={isOwn} />;
-      const wrapped = onOpenMedia ? (
+      const wrapped = onOpenMedia || onPress ? (
         <Pressable
           key={a.id}
-          onPress={() => onOpenMedia(a)}
+          onPress={() => {
+            if (onPress) onPress(message);
+            else if (onOpenMedia) onOpenMedia(a);
+          }}
+          onLongPress={onLongPress ? () => onLongPress(message) : undefined}
+          delayLongPress={250}
           style={({ pressed }) => pressed && { opacity: 0.85 }}
         >
           {media}
@@ -153,7 +239,9 @@ export function MessageBubble({
           {isLast && overlayOnLast && (
             <View style={styles.metaOverlay}>
               <Text style={styles.timeOverlay}>{formatMessageTime(message.createdAt)}</Text>
-              {isOwn && !message.deletedAt && <Tick status={message.status} />}
+              {isOwn && !message.deletedAt && (
+                <MediaStatus status={message.status} onRetry={onFailedRetry} />
+              )}
             </View>
           )}
         </View>
@@ -199,7 +287,7 @@ export function MessageBubble({
             <View style={styles.fileWrap}>{mediaStack(others, false)}</View>
           )}
           {message.text ? (
-            <Text style={[styles.text, { color: colors.text }]} selectable>
+            <Text style={[styles.text, { color: colors.text }]}>
               {message.text}
             </Text>
           ) : null}
@@ -211,14 +299,50 @@ export function MessageBubble({
   );
 
   return (
-    <View style={[styles.row, isOwn ? styles.rowOwn : styles.rowIncoming]}>
-      {onLongPress ? (
-        <Pressable onLongPress={() => onLongPress(message)} delayLongPress={250}>
-          {baseContent}
-        </Pressable>
-      ) : (
-        baseContent
-      )}
+    <View
+      style={[
+        styles.row,
+        isOwn ? styles.rowOwn : styles.rowIncoming,
+        hasReactions && styles.rowWithReactions,
+        selecting && !selected && styles.dimmed,
+      ]}
+    >
+      <View style={styles.bubbleWrap}>
+        <Animated.View
+          style={[
+            highlighted && { borderRadius: 8, borderWidth: 2, borderColor: colors.brand },
+            { transform: [{ translateX }] },
+          ]}
+          {...(swipeEnabled ? swipeResponder.panHandlers : {})}
+        >
+          {onLongPress || onPress ? (
+            <Pressable
+              onPress={() => onPress?.(message)}
+              onLongPress={() => onLongPress?.(message)}
+              delayLongPress={250}
+            >
+              {baseContent}
+            </Pressable>
+          ) : (
+            baseContent
+          )}
+        </Animated.View>
+        {reactionsOverlay}
+        {selecting && (
+          <View
+            style={[
+              styles.selectBadge,
+              isOwn ? styles.selectBadgeOwn : styles.selectBadgeIncoming,
+              {
+                backgroundColor: selected ? '#34B7F1' : 'transparent',
+                borderColor: selected ? '#34B7F1' : '#667781',
+              },
+            ]}
+          >
+            {selected && <Ionicons name="checkmark" size={13} color="#FFFFFF" />}
+          </View>
+        )}
+      </View>
     </View>
   );
 }
@@ -235,8 +359,33 @@ const styles = StyleSheet.create({
   rowIncoming: {
     justifyContent: 'flex-start',
   },
+  rowWithReactions: {
+    marginBottom: 24,
+  },
+  dimmed: {
+    opacity: 0.5,
+  },
+  selectBadge: {
+    position: 'absolute',
+    bottom: -6,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 6,
+  },
+  selectBadgeOwn: {
+    right: -6,
+  },
+  selectBadgeIncoming: {
+    left: -6,
+  },
+  bubbleWrap: {
+    maxWidth: '80%',
+  },
   bubble: {
-    maxWidth: '82%',
     minWidth: 96,
     borderRadius: 8,
     paddingHorizontal: 10,
@@ -337,23 +486,38 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'flex-end',
-    flexWrap: 'wrap',
     gap: 4,
     marginTop: 2,
   },
-  reactionPills: {
+  reactionsOverlay: {
+    position: 'absolute',
     flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'center',
     gap: 2,
-    marginRight: 6,
+    zIndex: 5,
+  },
+  reactionsOwn: {
+    right: -2,
+    bottom: -13,
+    justifyContent: 'flex-end',
+  },
+  reactionsIncoming: {
+    left: -2,
+    bottom: -13,
+    justifyContent: 'flex-start',
   },
   reactionPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#FFFFFF',
     borderRadius: 12,
     paddingHorizontal: 5,
-    paddingVertical: 1,
+    paddingVertical: 2,
+    shadowColor: '#000000',
+    shadowOpacity: 0.15,
+    shadowRadius: 3,
+    shadowOffset: { width: 0, height: 1 },
+    elevation: 3,
   },
   reactionEmoji: {
     fontSize: 12,
@@ -369,6 +533,7 @@ const styles = StyleSheet.create({
     marginLeft: 3,
     width: 16,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   deletedEnd: {
     height: 4,

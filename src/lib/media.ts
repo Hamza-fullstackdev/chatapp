@@ -1,4 +1,6 @@
 import { File } from 'expo-file-system';
+import * as ImagePicker from 'expo-image-picker';
+import { env } from '@/constants/env';
 import { uploadsApi } from '@/lib/api';
 import type { AttachmentDTO } from '@/types/api';
 
@@ -107,4 +109,38 @@ export function fileNameFromUri(uri: string, fallback = 'file'): string {
   const parts = cleaned.split('/');
   const last = parts[parts.length - 1];
   return last && last.includes('.') ? last : fallback;
+}
+
+// ---------------------------------------------------------------------------
+// Avatars (public avatars bucket — URLs render directly in <Avatar image>)
+// ---------------------------------------------------------------------------
+
+/** Turn a storage path (`avatars/...`) into a URL readable from any screen. */
+export function publicStorageUrl(storagePath: string): string {
+  return `${env.supabaseUrl}/storage/v1/object/public/${storagePath.replace(/^\/+/, '')}`;
+}
+
+/** Launch the system image picker in square-crop mode (profile photo). */
+export async function pickAvatarImage(): Promise<LocalUploadSource | null> {
+  const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+  if (!permission.granted) return null;
+  const result = await ImagePicker.launchImageLibraryAsync({
+    mediaTypes: ['images'],
+    allowsEditing: true,
+    aspect: [1, 1],
+    quality: 0.8,
+  });
+  if (result.canceled || result.assets.length === 0) return null;
+  const asset = result.assets[0]!;
+  return {
+    uri: asset.uri,
+    contentType: asset.mimeType ?? 'image/jpeg',
+    fileName: fileNameFromUri(asset.uri),
+  };
+}
+
+/** Upload a picked profile photo to the avatars bucket and return its public URL. */
+export async function uploadAvatar(source: LocalUploadSource): Promise<string> {
+  const { attachment } = await uploadAsset('avatars', source);
+  return publicStorageUrl(attachment.storagePath);
 }

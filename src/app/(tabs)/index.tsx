@@ -1,11 +1,13 @@
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { useState } from 'react';
 import { router, Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -13,6 +15,9 @@ import { useAuth } from '@/context/auth-context';
 import { useWaTheme } from '@/context/theme-context';
 import { useConversations } from '@/hooks/use-data';
 import { ConversationItem } from '@/components/conversation-item';
+import { conversationsApi } from '@/lib/api';
+import { getDb } from '@/db/database';
+import { deleteConversationsLocal } from '@/db/repositories';
 import type { ConversationDTO } from '@/types/api';
 
 function HeaderRight() {
@@ -37,20 +42,101 @@ export default function ChatsScreen() {
   const { colors } = useWaTheme();
   const { data: conversations, loading, error, refresh } = useConversations(user?.id ?? '', true);
 
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  const enterSelection = (id: string) => {
+    setSelected(new Set([id]));
+    setSelectMode(true);
+  };
+
+  const toggleSelected = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const exitSelection = () => {
+    setSelectMode(false);
+    setSelected(new Set());
+  };
+
+  const confirmDeleteChats = () => {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    Alert.alert(
+      'Delete chats',
+      `Delete ${ids.length} chat${ids.length > 1 ? 's' : ''}?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => void deleteChats(ids),
+        },
+      ],
+    );
+  };
+
+  const deleteChats = async (ids: string[]) => {
+    try {
+      await conversationsApi.remove(ids);
+      const db = await getDb();
+      await deleteConversationsLocal(db, ids);
+    } catch (e) {
+      Alert.alert('Could not delete chats', e instanceof Error ? e.message : 'Please try again');
+    } finally {
+      exitSelection();
+      void refresh();
+    }
+  };
+
   const renderItem = ({ item }: { item: ConversationDTO }) => (
     <ConversationItem
       conversation={item}
       currentUserId={user?.id ?? ''}
-      onPress={(id) => router.push({ pathname: '/chat/[id]', params: { id } })}
+      selecting={selectMode}
+      selected={selected.has(item.id)}
+      onPress={(id) => {
+        if (selectMode) toggleSelected(id);
+        else router.push({ pathname: '/chat/[id]', params: { id } });
+      }}
+      onLongPress={enterSelection}
     />
   );
 
   return (
-    <SafeAreaView edges={['top']} style={[styles.safe, { backgroundColor: colors.background }]}>
+    <SafeAreaView edges={['bottom']} style={[styles.safe, { backgroundColor: colors.background }]}>
       <Tabs.Screen
         options={{
-          headerRight: () => <HeaderRight />,
           headerShadowVisible: false,
+          headerTitle: selectMode ? `${selected.size} selected` : 'Chats',
+          headerLeft: selectMode
+            ? () => (
+                <Pressable
+                  onPress={exitSelection}
+                  hitSlop={10}
+                  style={styles.headerIcon}
+                >
+                  <Ionicons name="close" size={24} color="#FFFFFF" />
+                </Pressable>
+              )
+            : undefined,
+          headerRight: selectMode
+            ? () => (
+                <Pressable
+                  onPress={confirmDeleteChats}
+                  disabled={selected.size === 0}
+                  hitSlop={10}
+                  style={[styles.headerIcon, { opacity: selected.size === 0 ? 0.4 : 1 }]}
+                >
+                  <Ionicons name="trash-outline" size={22} color="#FFFFFF" />
+                </Pressable>
+              )
+            : () => <HeaderRight />,
         }}
       />
 
@@ -85,12 +171,14 @@ export default function ChatsScreen() {
         />
       )}
 
-      <Pressable
-        onPress={() => router.push('/contacts')}
-        style={({ pressed }) => [styles.fab, { backgroundColor: pressed ? '#00806b' : colors.brand }]}
-      >
-        <Ionicons name="add" size={30} color="#FFFFFF" />
-      </Pressable>
+      {!selectMode && (
+        <Pressable
+          onPress={() => router.push('/contacts')}
+          style={({ pressed }) => [styles.fab, { backgroundColor: pressed ? '#00806b' : colors.brand }]}
+        >
+          <Ionicons name="add" size={30} color="#FFFFFF" />
+        </Pressable>
+      )}
     </SafeAreaView>
   );
 }
@@ -113,7 +201,7 @@ const styles = StyleSheet.create({
     padding: 24,
   },
   listContent: {
-    paddingVertical: 4,
+    paddingVertical: 2,
     flexGrow: 1,
   },
   separator: {

@@ -3,9 +3,9 @@ import {
   ActivityIndicator,
   Alert,
   FlatList,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
-  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -36,13 +36,16 @@ import {
   setMessageReadStatus as persistRead,
   setMessageReactions as persistReactions,
   deleteMessageRow as persistDelete,
+  deleteMessagesLocal as persistDeleteMany,
   upsertMessage as persistMessage,
   upsertConversation as persistConversation,
 } from '@/db/repositories';
 import { getAttachmentUrl, uploadAsset, fileNameFromUri } from '@/lib/media';
 import { MessageBubble } from '@/components/message-bubble';
 import { MessageActionsSheet } from '@/components/message-actions-sheet';
+import { Avatar } from '@/components/avatar';
 import { BUILTIN_GIFS, BUILTIN_STICKERS } from '@/constants/media-sources';
+import { EMOJIS, EMOJI_GROUPS, type EmojiEntry } from '@/constants/emojis';
 import type {
   AttachmentDTO,
   ConversationDetailDTO,
@@ -91,6 +94,10 @@ function isRetryableError(e: unknown): boolean {
   if (e instanceof ApiError) return e.status >= 500;
   return true;
 }
+
+// Content signatures of sends currently in flight; swallows duplicate taps of
+// the same message while still letting other messages queue up (pipeline).
+const inFlightSends = new Set<string>();
 
 function attachToDto(
   conversationId: string,
@@ -141,7 +148,7 @@ export default function ChatScreen() {
   const params = useLocalSearchParams<{ id: string }>();
   const conversationId = String(params.id ?? '');
   const { user } = useAuth();
-  const { colors } = useWaTheme();
+  const { colors, dark } = useWaTheme();
   const { connected } = useSocket();
   const { pendingCount } = useSync();
 
@@ -156,13 +163,15 @@ export default function ChatScreen() {
   const [optimistic, setOptimistic] = useState<MessageDTO[]>([]);
 
   const [draft, setDraft] = useState('');
-  const [sending, setSending] = useState(false);
   const [typingUsers, setTypingUsers] = useState<string[]>([]);
   const [peers, setPeers] = useState<Record<string, boolean>>({});
 
   const [replyTarget, setReplyTarget] = useState<MessageDTO | null>(null);
   const [editTarget, setEditTarget] = useState<MessageDTO | null>(null);
   const [actionTarget, setActionTarget] = useState<MessageDTO | null>(null);
+
+  const [selectMessages, setSelectMessages] = useState(false);
+  const [selectedMessageIds, setSelectedMessageIds] = useState<Set<string>>(new Set());
 
   const [addMenu, setAddMenu] = useState(false);
   const [stickerModal, setStickerModal] = useState(false);
@@ -181,6 +190,7 @@ export default function ChatScreen() {
   const typingTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const lastReadSent = useRef('');
   const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inputRef = useRef<TextInput>(null);
 
   // ------------------------------------------------------------------
   // Derived state
@@ -202,6 +212,17 @@ export default function ChatScreen() {
     return map;
   }, [messages]);
 
+  // A message can be deleted "for everyone" only by its sender (or any
+  // message by a group admin). Mirrors the server-side permission rule so a
+  // selection containing other people's messages never silently no-ops.
+  const isDeletable = (m: MessageDTO) =>
+    !m.deletedAt && (m.senderId === myId || (isGroup && amAdmin));
+
+  const deletableSelectedCount = [...selectedMessageIds].filter((id) => {
+    const m = messageById.get(id);
+    return m ? isDeletable(m) : false;
+  }).length;
+
   const title = isGroup
     ? conv?.name ?? 'Group'
     : conv?.otherUserName ?? 'Chat';
@@ -212,6 +233,18 @@ export default function ChatScreen() {
       : peerOnline
         ? 'online'
         : 'last seen recently';
+
+  // Tap the header name (or DP / ⋮) to open the peer's profile; groups open
+  // their info screen.
+  const openProfile = () => {
+    if (isGroup) {
+      router.push(`/chat/${conversationId}/group-info`);
+    } else if (otherUserId) {
+      router.push({ pathname: '/user/[id]', params: { id: otherUserId } });
+    }
+  };
+  const headerAvatarUri = isGroup ? conv?.avatarUrl : conv?.otherUserAvatarUrl;
+  const headerAvatarName = isGroup ? title : conv?.otherUserName ?? title;
 
   // ------------------------------------------------------------------
   // Initial load: show the cached copy from SQLite instantly, then
@@ -451,20 +484,24 @@ export default function ChatScreen() {
   // Send / retry
   // ------------------------------------------------------------------
   const send = async (draft: SendDraft, clientMessageId?: string) => {
-    if (sending) return;
     if (!draft.text?.trim() && !draft.attachment) return;
     const cid = clientMessageId ?? Crypto.randomUUID();
+    const attachment = draft.attachment;
+    const sig = `${draft.type ?? ''}|${draft.text ?? ''}|${draft.replyTo ?? ''}|${
+      attachment?.localUri ?? attachment?.gifUrl ?? attachment?.previewUrl ?? attachment?.storagePath ?? ''
+    }`;
+    if (inFlightSends.has(sig)) return;
+    inFlightSends.add(sig);
     const optimistic = attachToDto(conversationId, myId, cid, draft);
     addOptimistic(optimistic);
     if (!draft.attachment) setDraft('');
     setReplyTarget(null);
-    setSending(true);
     sendTyping(conversationId, false);
 
     try {
       const { message } = await messagesApi.send(conversationId, {
         text: draft.text?.trim() || undefined,
-        type: draft.type,
+        type: draft.type ?? draft.attachment?.type ?? 'text',
         clientMessageId: cid,
         replyTo: draft.replyTo,
         attachment: draft.attachment
@@ -506,7 +543,7 @@ export default function ChatScreen() {
         );
       }
     } finally {
-      setSending(false);
+      inFlightSends.delete(sig);
     }
   };
 
@@ -549,6 +586,14 @@ export default function ChatScreen() {
   // ------------------------------------------------------------------
   // Edit / delete / react
   // ------------------------------------------------------------------
+  const startReply = (message: MessageDTO) => {
+    if (message.deletedAt) return;
+    setReplyTarget(message);
+    setEditTarget(null);
+    setDraft('');
+    inputRef.current?.focus();
+  };
+
   const startEdit = async (message: MessageDTO) => {
     if (message.attachments.length > 0) {
       setEditTarget(message);
@@ -699,13 +744,134 @@ export default function ChatScreen() {
   const isReacted = (message: MessageDTO, emoji: string) =>
     message.reactions.some((r) => r.userId === myId && r.emoji === emoji);
 
+  // ------------------------------------------------------------------
+  // Multi-select / bulk delete
+  // ------------------------------------------------------------------
+  const openMessageActions = (message: MessageDTO) => {
+    Keyboard.dismiss();
+    setSelectedMessageIds(new Set([message.id]));
+    setSelectMessages(false);
+    setActionTarget(message);
+  };
+
+  const toggleMessageSelected = (message: MessageDTO) => {
+    setActionTarget(null);
+    setSelectedMessageIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(message.id)) next.delete(message.id);
+      else next.add(message.id);
+      return next;
+    });
+  };
+
+  // Tap behavior (WhatsApp-style): with the actions sheet open from a single
+  // long-press, tapping the same message cancels it; tapping any other
+  // message promotes to multi-select with both selected.
+  const handleMessagePress = (message: MessageDTO) => {
+    if (selectMessages) {
+      toggleMessageSelected(message);
+      return;
+    }
+    if (actionTarget) {
+      setActionTarget(null);
+      if (actionTarget.id === message.id) {
+        setSelectedMessageIds(new Set());
+      } else {
+        setSelectedMessageIds((prev) => new Set(prev).add(message.id));
+        setSelectMessages(true);
+      }
+    }
+  };
+
+  const closeActionSheet = () => {
+    setActionTarget(null);
+    if (!selectMessages) setSelectedMessageIds(new Set());
+  };
+
+  const exitMessageSelection = () => {
+    setSelectMessages(false);
+    setSelectedMessageIds(new Set());
+  };
+
+  const openSingleActions = () => {
+    const only = [...selectedMessageIds][0];
+    const target = only ? messageById.get(only) : null;
+    if (target) setActionTarget(target);
+  };
+
+  const confirmDeleteSelectedMessages = () => {
+    const ids = [...selectedMessageIds];
+    if (ids.length === 0) return;
+    const deletable = ids.filter((id) => {
+      const m = messageById.get(id);
+      return m ? isDeletable(m) : false;
+    });
+    const skipped = ids.length - deletable.length;
+
+    if (deletable.length === 0) {
+      exitMessageSelection();
+      Alert.alert(
+        'Cannot delete',
+        'You can only delete your own messages. Group admins can delete any message in a group.',
+      );
+      return;
+    }
+
+    Alert.alert(
+      'Delete messages',
+      skipped > 0
+        ? `Delete ${deletable.length} of ${ids.length} selected message${deletable.length > 1 ? 's' : ''} for everyone? ${skipped} ${skipped === 1 ? "message isn't" : "messages aren't"} yours to delete.`
+        : `Delete ${deletable.length} message${deletable.length > 1 ? 's' : ''} for everyone?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: () => void deleteSelectedMessages(deletable) },
+      ],
+    );
+  };
+
+  const deleteSelectedMessages = async (ids: string[]) => {
+    if (ids.length === 0) return;
+    const idSet = new Set(ids);
+    const remaining = [...selectedMessageIds].filter((id) => !idSet.has(id));
+    if (remaining.length === 0) {
+      exitMessageSelection();
+    } else {
+      setSelectedMessageIds(new Set(remaining));
+    }
+    setBase((prev) => prev.filter((m) => !idSet.has(m.id)));
+    setOptimistic((prev) => prev.filter((m) => !idSet.has(m.id)));
+    try {
+      const { deletedIds } = await messagesApi.deleteMany(ids);
+      if (deletedIds.length > 0) {
+        void (async () => {
+          const db = await getDb();
+          await persistDeleteMany(db, deletedIds);
+        })();
+      }
+    } catch (e) {
+      if (isRetryableError(e)) {
+        for (const id of ids) {
+          void enqueueOp({
+            opId: `delete:${id}`,
+            type: 'DELETE_MESSAGE',
+            clientMessageId: id,
+            conversationId,
+            payload: { messageId: id },
+            createdAt: new Date().toISOString(),
+          });
+        }
+      }
+    }
+  };
+
   const toggleReact = async (message: MessageDTO, emoji: string) => {
     const turningOn = !isReacted(message, emoji);
+    // A user holds at most one reaction per message: keep everyone else's
+    // pills, and either remove or replace our own.
+    const otherReactions = message.reactions.filter((r) => r.userId !== myId);
     const nextReactions = turningOn
-      ? [...message.reactions, { userId: myId, emoji }]
-      : message.reactions.filter(
-          (r) => !(r.userId === myId && r.emoji === emoji),
-        );
+      ? [...otherReactions, { userId: myId, emoji }]
+      : otherReactions;
     setBase((prev) =>
       prev.map((m) => (m.id === message.id ? { ...m, reactions: nextReactions } : m)),
     );
@@ -764,6 +930,29 @@ export default function ChatScreen() {
     return true;
   };
 
+  // The editor is opt-in: media is picked whole (no forced crop). This
+  // re-opens the picker in edit mode only when the user taps the Crop button,
+  // e.g. to crop or rotate the image. Cancelling keeps the original preview.
+  const editPreview = async () => {
+    const current = mediaPreview;
+    if (!current || current.type !== 'image') return;
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      allowsEditing: true,
+      aspect: [4, 3],
+      quality: 1,
+    });
+    if (result.canceled || result.assets.length === 0) return;
+    const asset = result.assets[0]!;
+    setMediaPreview({
+      uri: asset.uri,
+      type: 'image',
+      mimeType: asset.mimeType ?? 'image/jpeg',
+      width: asset.width,
+      height: asset.height,
+    });
+  };
+
   const closePreview = () => {
     setMediaPreview(null);
     setPreviewCaption('');
@@ -772,9 +961,37 @@ export default function ChatScreen() {
   const sendPreview = async () => {
     const item = mediaPreview;
     if (!item || uploading) return;
+    const isVideo = item.type === 'video';
+    const type = isVideo ? 'video' : 'image';
+    const target = editTarget;
+
+    // New media: register the pending bubble (local image + progress spinner)
+    // instantly so the upload state is visible, like WhatsApp.
+    const cid = Crypto.randomUUID();
+    if (!target) {
+      addOptimistic(
+        attachToDto(
+          conversationId,
+          myId,
+          cid,
+          {
+            text: previewCaption.trim() || undefined,
+            type,
+            attachment: {
+              type,
+              mimeType: item.mimeType,
+              width: item.width,
+              height: item.height,
+              localUri: item.uri,
+            },
+          },
+          'pending',
+        ),
+      );
+    }
+
     setUploading(true);
     try {
-      const isVideo = item.type === 'video';
       const contentType = item.mimeType ?? (isVideo ? 'video/mp4' : 'image/jpeg');
       const uploaded = await uploadAsset('chat-media', {
         uri: item.uri,
@@ -782,7 +999,6 @@ export default function ChatScreen() {
         fileName: undefined,
         size: undefined,
       });
-      const target = editTarget;
       const attachment: DraftAttachment = {
         ...uploaded.attachment,
         width: item.width,
@@ -792,13 +1008,20 @@ export default function ChatScreen() {
       if (target) {
         await commitMediaEdit(target, attachment);
       } else {
-        await send({
-          text: previewCaption.trim() || undefined,
-          attachment,
-        });
+        await send(
+          {
+            text: previewCaption.trim() || undefined,
+            type,
+            attachment,
+          },
+          cid,
+        );
       }
       closePreview();
     } catch (e) {
+      if (!target) {
+        setOptimistic((prev) => prev.filter((o) => o.clientMessageId !== cid));
+      }
       Alert.alert('Upload failed', e instanceof Error ? e.message : 'Could not upload media');
     } finally {
       setUploading(false);
@@ -858,7 +1081,7 @@ export default function ChatScreen() {
     );
   }
 
-  if (error || !detail) {
+  if (error && base.length === 0 && !localConv) {
     return (
       <SafeAreaView edges={['top', 'bottom']} style={[styles.safe, { backgroundColor: colors.background }]}>
         <View style={styles.center}>
@@ -879,30 +1102,61 @@ export default function ChatScreen() {
   return (
     <SafeAreaView edges={['top', 'bottom']} style={[styles.safe, { backgroundColor: colors.chatBackground }]}>
       {/* Header */}
-      <View style={[styles.header, { backgroundColor: colors.brandDark }]}>
-        <Pressable hitSlop={10} onPress={() => router.back()} style={styles.headerBtn}>
-          <Ionicons name="arrow-back" size={24} color="#FFFFFF" />
-        </Pressable>
-        <View style={styles.headerInfo}>
-          <Text style={styles.headerTitle} numberOfLines={1}>
-            {title}
-          </Text>
-          <Text style={styles.headerSubtitle} numberOfLines={1}>
-            {subtitle}
-          </Text>
+      {selectMessages ? (
+        <View style={[styles.header, { backgroundColor: colors.brandDark }]}>
+          <Pressable hitSlop={10} onPress={exitMessageSelection} style={styles.headerBtn}>
+            <Ionicons name="close" size={24} color="#FFFFFF" />
+          </Pressable>
+          <View style={styles.headerInfo}>
+            <Text style={styles.headerTitle} numberOfLines={1}>
+              {selectedMessageIds.size} selected
+            </Text>
+          </View>
+          {selectedMessageIds.size === 1 && (
+            <Pressable hitSlop={10} onPress={openSingleActions} style={styles.headerBtn}>
+              <Ionicons name="ellipsis-vertical" size={20} color="#FFFFFF" />
+            </Pressable>
+          )}
+          <Pressable
+            hitSlop={10}
+            onPress={confirmDeleteSelectedMessages}
+            disabled={deletableSelectedCount === 0}
+            style={[styles.headerBtn, { opacity: deletableSelectedCount === 0 ? 0.4 : 1 }]}
+          >
+            <Ionicons name="trash-outline" size={20} color="#FFFFFF" />
+          </Pressable>
         </View>
-        <Pressable
-          hitSlop={10}
-          style={styles.headerBtn}
-          onPress={() =>
-            isGroup
-              ? router.push(`/chat/${conversationId}/group-info`)
-              : router.push(`/chat/${conversationId}`)
-          }
-        >
-          <Ionicons name="ellipsis-vertical" size={20} color="#FFFFFF" />
-        </Pressable>
-      </View>
+      ) : (
+        <View style={[styles.header, { backgroundColor: colors.brandDark }]}>
+          <Pressable hitSlop={10} onPress={() => router.back()} style={styles.headerBtn}>
+            <Ionicons name="arrow-back" size={24} color="#FFFFFF" />
+          </Pressable>
+          <Pressable
+            style={styles.headerInfo}
+            onPress={openProfile}
+            disabled={!conv}
+          >
+            <View style={styles.headerBody}>
+              <Avatar name={headerAvatarName} uri={headerAvatarUri} size={36} />
+              <View style={styles.headerTextWrap}>
+                <Text style={styles.headerTitle} numberOfLines={1}>
+                  {title}
+                </Text>
+                <Text style={styles.headerSubtitle} numberOfLines={1}>
+                  {subtitle}
+                </Text>
+              </View>
+            </View>
+          </Pressable>
+          <Pressable
+            hitSlop={10}
+            style={styles.headerBtn}
+            onPress={openProfile}
+          >
+            <Ionicons name="ellipsis-vertical" size={20} color="#FFFFFF" />
+          </Pressable>
+        </View>
+      )}
 
       <KeyboardAvoidingView style={styles.flex} behavior="padding">
         <FlatList
@@ -923,7 +1177,12 @@ export default function ChatScreen() {
                     : undefined
                 }
                 onFailedRetry={item.status === 'failed' ? () => retry(item) : undefined}
-                onLongPress={setActionTarget}
+                onLongPress={openMessageActions}
+                onPress={selectMessages || actionTarget ? handleMessagePress : undefined}
+                onSwipeToReply={selectMessages ? undefined : startReply}
+                selecting={selectMessages}
+                selected={selectedMessageIds.has(item.id)}
+                highlighted={!selectMessages && selectedMessageIds.has(item.id)}
                 onOpenMedia={setViewer}
               />
             );
@@ -982,47 +1241,50 @@ export default function ChatScreen() {
 
         {/* Input bar */}
         <View style={[styles.inputBar, { backgroundColor: colors.incomingBubble }]}>
-          <Pressable hitSlop={8} onPress={() => setAddMenu(true)} style={styles.iconBtn}>
+          <Pressable hitSlop={8} onPress={() => setAddMenu(true)} style={styles.addBtn}>
             <Ionicons name="add" size={26} color={colors.brand} />
           </Pressable>
-          <TextInput
-            value={draft}
-            onChangeText={onChangeDraft}
-            placeholder={editTarget ? 'Edit message' : 'Message'}
-            placeholderTextColor={colors.textSecondary}
-            multiline
-            style={[styles.input, { color: colors.text }]}
-            onSubmitEditing={() => (editTarget ? commitEdit() : sendText())}
-            blurOnSubmit={false}
-          />
-          <Pressable hitSlop={8} onPress={() => setStickerModal(true)} style={styles.iconBtn}>
-            <Ionicons name="happy" size={24} color={colors.brand} />
-          </Pressable>
-          {editTarget ? (
-            <Pressable
-              onPress={commitEdit}
-              disabled={!draft.trim()}
-              style={({ pressed }) => [
-                styles.sendBtn,
-                { backgroundColor: pressed ? '#00806b' : colors.brand },
-                !draft.trim() && styles.sendBtnDisabled,
-              ]}
-            >
-              <Ionicons name="checkmark" size={22} color="#FFFFFF" />
+          <View style={[styles.inputPill, { backgroundColor: dark ? 'rgba(134,150,160,0.22)' : 'rgba(0,0,0,0.05)' }]}>
+            <Pressable hitSlop={8} onPress={() => setStickerModal(true)} style={styles.emojiBtn}>
+              <Ionicons name="happy" size={24} color={colors.brand} />
             </Pressable>
-          ) : (
-            <Pressable
-              onPress={sendText}
-              disabled={sending || !draft.trim()}
-              style={({ pressed }) => [
-                styles.sendBtn,
-                { backgroundColor: pressed ? '#00806b' : colors.brand },
-                (!draft.trim() || sending) && styles.sendBtnDisabled,
-              ]}
-            >
-              <Ionicons name="arrow-up" size={22} color="#FFFFFF" />
-            </Pressable>
-          )}
+            <TextInput
+              ref={inputRef}
+              value={draft}
+              onChangeText={onChangeDraft}
+              placeholder={editTarget ? 'Edit message' : 'Message'}
+              placeholderTextColor={colors.textSecondary}
+              multiline
+              style={[styles.input, { color: colors.text }]}
+              onSubmitEditing={() => (editTarget ? commitEdit() : sendText())}
+              blurOnSubmit={false}
+            />
+            {editTarget ? (
+              <Pressable
+                onPress={commitEdit}
+                disabled={!draft.trim()}
+                style={({ pressed }) => [
+                  styles.sendBtn,
+                  { backgroundColor: pressed ? '#00806b' : colors.brand },
+                  !draft.trim() && styles.sendBtnDisabled,
+                ]}
+              >
+                <Ionicons name="checkmark" size={20} color="#FFFFFF" />
+              </Pressable>
+            ) : (
+              <Pressable
+                onPress={sendText}
+                disabled={!draft.trim()}
+                style={({ pressed }) => [
+                  styles.sendBtn,
+                  { backgroundColor: pressed ? '#00806b' : colors.brand },
+                  !draft.trim() && styles.sendBtnDisabled,
+                ]}
+              >
+                <Ionicons name="arrow-up" size={20} color="#FFFFFF" />
+              </Pressable>
+            )}
+          </View>
         </View>
       </KeyboardAvoidingView>
 
@@ -1032,14 +1294,13 @@ export default function ChatScreen() {
           message={actionTarget}
           visible={!!actionTarget}
           canEdit={actionTarget.senderId === myId && !actionTarget.deletedAt}
-          canDelete={
-            (actionTarget.senderId === myId || (isGroup && amAdmin)) && !actionTarget.deletedAt
-          }
+          canDelete={isDeletable(actionTarget)}
           onReact={(emoji) => void toggleReact(actionTarget, emoji)}
           onReply={() => {
             setReplyTarget(actionTarget);
             setEditTarget(null);
             setDraft('');
+            inputRef.current?.focus();
           }}
           onEdit={() => startEdit(actionTarget)}
           onDelete={() => {
@@ -1052,7 +1313,7 @@ export default function ChatScreen() {
               ],
             );
           }}
-          onClose={() => setActionTarget(null)}
+          onClose={closeActionSheet}
         />
       )}
 
@@ -1081,11 +1342,12 @@ export default function ChatScreen() {
         </Pressable>
       </Modal>
 
-      {/* GIF / sticker picker */}
-      <GifStickerPicker
+      {/* Emoji / GIF / sticker picker */}
+      <EmojiStickerGifPicker
         visible={stickerModal}
         onClose={() => setStickerModal(false)}
-        onPick={sendGifOrSticker}
+        onPickEmoji={(char) => setDraft((prev) => prev + char)}
+        onPickItem={sendGifOrSticker}
       />
 
       {/* Preview before sending picked media */}
@@ -1096,6 +1358,7 @@ export default function ChatScreen() {
           onChangeCaption={setPreviewCaption}
           uploading={uploading}
           onSend={() => void sendPreview()}
+          onEdit={mediaPreview.type === 'image' ? () => void editPreview() : undefined}
           onClose={closePreview}
         />
       )}
@@ -1106,17 +1369,20 @@ export default function ChatScreen() {
   );
 }
 
-function GifStickerPicker({
+function EmojiStickerGifPicker({
   visible,
   onClose,
-  onPick,
+  onPickEmoji,
+  onPickItem,
 }: {
   visible: boolean;
   onClose: () => void;
-  onPick: (item: { type: 'gif' | 'sticker'; url: string }) => void;
+  onPickEmoji: (char: string) => void;
+  onPickItem: (item: { type: 'gif' | 'sticker'; url: string }) => void;
 }) {
   const { colors } = useWaTheme();
-  const [tab, setTab] = useState<'gif' | 'sticker'>('gif');
+  const [tab, setTab] = useState<'emoji' | 'gif' | 'sticker'>('emoji');
+  const [emojiGroup, setEmojiGroup] = useState<number | 'all'>('all');
   const [stickers, setStickers] = useState<{ id: string; url: string; title: string }[]>([]);
 
   useEffect(() => {
@@ -1139,53 +1405,124 @@ function GifStickerPicker({
       .catch(() => setStickers(BUILTIN_STICKERS));
   }, [visible]);
 
-  const items = tab === 'gif' ? BUILTIN_GIFS : stickers;
+  const emojiItems = useMemo(
+    () => (emojiGroup === 'all' ? EMOJIS : EMOJIS.filter((e) => e.group === emojiGroup)),
+    [emojiGroup],
+  );
+
+  const tabs = [
+    { key: 'emoji' as const, label: 'Emoji' },
+    { key: 'gif' as const, label: 'GIFs' },
+    { key: 'sticker' as const, label: 'Stickers' },
+  ];
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose} transparent>
-      <View style={[styles.stickerSheet, { backgroundColor: colors.incomingBubble }]}>
-        <View style={styles.stickerHeader}>
-          <Pressable hitSlop={8} onPress={onClose}>
-            <Ionicons name="close" size={22} color={colors.textSecondary} />
-          </Pressable>
-          <View style={styles.tabRow}>
-            {(['gif', 'sticker'] as const).map((t) => (
-              <Pressable key={t} onPress={() => setTab(t)} style={styles.tab}>
-                <Text
-                  style={[
-                    styles.tabLabel,
-                    t === tab ? { color: colors.brand } : { color: colors.textSecondary },
-                    t === tab && styles.tabActive,
-                  ]}
-                >
-                  {t === 'gif' ? 'GIFs' : 'Stickers'}
+      <View style={styles.stickerOverlay}>
+        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+        <View style={[styles.stickerSheet, { backgroundColor: colors.incomingBubble }]}>
+          <View style={styles.stickerHeader}>
+            <Pressable hitSlop={8} onPress={onClose}>
+              <Ionicons name="close" size={22} color={colors.textSecondary} />
+            </Pressable>
+            <View style={styles.tabRow}>
+              {tabs.map((t) => (
+                <Pressable key={t.key} onPress={() => setTab(t.key)} style={styles.tab}>
+                  <Text
+                    style={[
+                      styles.tabLabel,
+                      t.key === tab ? { color: colors.brand } : { color: colors.textSecondary },
+                      t.key === tab && styles.tabActive,
+                    ]}
+                  >
+                    {t.label}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+
+          {tab === 'emoji' && (
+            <View style={styles.emojiChipRow}>
+              <Pressable
+                style={[styles.emojiChip, emojiGroup === 'all' && styles.emojiChipActive]}
+                onPress={() => setEmojiGroup('all')}
+              >
+                <Text style={[styles.emojiChipLabel, emojiGroup === 'all' && styles.emojiChipLabelActive]}>
+                  All
                 </Text>
               </Pressable>
-            ))}
-          </View>
-        </View>
-        <FlatList
-          data={items}
-          numColumns={4}
-          keyExtractor={(item) => item.id}
-          ListEmptyComponent={
-            <View style={styles.center}>
-              <Text style={{ color: colors.textSecondary }}>Nothing here yet</Text>
+              {EMOJI_GROUPS.map((g) => (
+                <Pressable
+                  key={g.key}
+                  style={[styles.emojiChip, emojiGroup === g.key && styles.emojiChipActive]}
+                  onPress={() => setEmojiGroup(g.key)}
+                >
+                  <Text
+                    style={[styles.emojiChipLabel, emojiGroup === g.key && styles.emojiChipLabelActive]}
+                  >
+                    {g.label}
+                  </Text>
+                </Pressable>
+              ))}
             </View>
-          }
-          renderItem={({ item }) => (
-            <Pressable style={styles.stickerCell} onPress={() => onPick({ type: tab, url: item.url })}>
-              {item.url ? (
-                <Image source={{ uri: item.url }} style={styles.stickerThumb} contentFit="contain" />
-              ) : (
-                <Ionicons name={tab === 'gif' ? 'play-circle' : 'happy'} size={40} color={colors.textSecondary} />
-              )}
-              <Text style={[styles.stickerTitle, { color: colors.textSecondary }]} numberOfLines={1}>
-                {item.title}
-              </Text>
-            </Pressable>
           )}
-        />
+
+          {tab === 'emoji' && (
+            <FlatList
+              key={`emoji-${emojiGroup}`}
+              data={emojiItems}
+              numColumns={8}
+              keyExtractor={(item: EmojiEntry) => item.char}
+              renderItem={({ item }) => (
+                <Pressable style={styles.emojiCell} onPress={() => onPickEmoji(item.char)}>
+                  <Text style={styles.emojiChar}>{item.char}</Text>
+                </Pressable>
+              )}
+            />
+          )}
+
+          {tab === 'gif' && (
+            <FlatList
+              data={BUILTIN_GIFS}
+              numColumns={4}
+              keyExtractor={(item) => item.id}
+              renderItem={({ item }) => (
+                <Pressable style={styles.stickerCell} onPress={() => onPickItem({ type: 'gif', url: item.url })}>
+                  <Image source={{ uri: item.url }} style={styles.stickerThumb} contentFit="contain" />
+                  <Text style={[styles.stickerTitle, { color: colors.textSecondary }]} numberOfLines={1}>
+                    {item.title}
+                  </Text>
+                </Pressable>
+              )}
+            />
+          )}
+
+          {tab === 'sticker' && (
+            <FlatList
+              data={stickers}
+              numColumns={4}
+              keyExtractor={(item) => item.id}
+              ListEmptyComponent={
+                <View style={styles.center}>
+                  <Text style={{ color: colors.textSecondary }}>Nothing here yet</Text>
+                </View>
+              }
+              renderItem={({ item }) => (
+                <Pressable style={styles.stickerCell} onPress={() => onPickItem({ type: 'sticker', url: item.url })}>
+                  {item.url ? (
+                    <Image source={{ uri: item.url }} style={styles.stickerThumb} contentFit="contain" />
+                  ) : (
+                    <Ionicons name="happy" size={40} color={colors.textSecondary} />
+                  )}
+                  <Text style={[styles.stickerTitle, { color: colors.textSecondary }]} numberOfLines={1}>
+                    {item.title}
+                  </Text>
+                </Pressable>
+              )}
+            />
+          )}
+        </View>
       </View>
     </Modal>
   );
@@ -1197,6 +1534,7 @@ function MediaPreviewModal({
   onChangeCaption,
   uploading,
   onSend,
+  onEdit,
   onClose,
 }: {
   preview: { uri: string; type: 'image' | 'video'; width?: number; height?: number };
@@ -1204,6 +1542,7 @@ function MediaPreviewModal({
   onChangeCaption: (text: string) => void;
   uploading: boolean;
   onSend: () => void;
+  onEdit?: () => void;
   onClose: () => void;
 }) {
   const { colors } = useWaTheme();
@@ -1235,6 +1574,19 @@ function MediaPreviewModal({
           )}
         </View>
         <View style={styles.previewFooter}>
+          {onEdit && (
+            <Pressable
+              onPress={onEdit}
+              disabled={uploading}
+              style={({ pressed }) => [
+                styles.previewEditBtn,
+                pressed && styles.previewEditBtnPressed,
+              ]}
+            >
+              <Ionicons name="crop-outline" size={18} color="#FFFFFF" />
+              <Text style={styles.previewEditText}>Crop</Text>
+            </Pressable>
+          )}
           <TextInput
             value={caption}
             onChangeText={onChangeCaption}
@@ -1331,6 +1683,17 @@ const styles = StyleSheet.create({
     backgroundColor: '#111111',
   },
   previewInput: { flex: 1, color: '#FFFFFF', fontSize: 16, padding: 0 },
+  previewEditBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderRadius: 18,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  previewEditBtnPressed: { backgroundColor: 'rgba(255,255,255,0.22)' },
+  previewEditText: { color: '#FFFFFF', fontSize: 14, fontWeight: '600' },
   previewSend: {
     width: 44,
     height: 44,
@@ -1357,6 +1720,8 @@ const styles = StyleSheet.create({
   },
   headerBtn: { padding: 8 },
   headerInfo: { flex: 1, marginLeft: 4 },
+  headerBody: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  headerTextWrap: { flex: 1 },
   headerTitle: { color: '#FFFFFF', fontSize: 17, fontWeight: '600' },
   headerSubtitle: { color: 'rgba(255,255,255,0.8)', fontSize: 12, marginTop: 1 },
   listContent: { paddingVertical: 10, flexGrow: 1 },
@@ -1380,25 +1745,46 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
     paddingHorizontal: 8,
     paddingVertical: 8,
-    gap: 4,
+    gap: 6,
   },
-  iconBtn: { padding: 6, marginBottom: 4 },
-  input: {
-    flex: 1,
-    maxHeight: 120,
-    fontSize: 16,
-    paddingHorizontal: 14,
-    paddingVertical: Platform.OS === 'ios' ? 10 : 8,
-    borderRadius: 20,
-    backgroundColor: 'rgba(0,0,0,0.04)',
-  },
-  sendBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+  addBtn: {
+    width: 40,
+    height: 46,
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 2,
+  },
+  inputPill: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 22,
+    paddingHorizontal: 4,
+    paddingVertical: 4,
+    minHeight: 44,
+    maxHeight: 116,
+    gap: 2,
+  },
+  emojiBtn: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  input: {
+    flex: 1,
+    maxHeight: 96,
+    fontSize: 16,
+    paddingHorizontal: 2,
+    paddingVertical: 6,
+    textAlignVertical: 'center',
+  },
+  sendBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   sendBtnDisabled: { opacity: 0.45 },
   overlay: {
@@ -1419,8 +1805,13 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
   },
   addLabel: { fontSize: 16 },
+  stickerOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    justifyContent: 'flex-end',
+  },
   stickerSheet: {
-    maxHeight: 420,
+    height: 420,
     borderTopLeftRadius: 18,
     borderTopRightRadius: 18,
     paddingHorizontal: 12,
@@ -1446,4 +1837,39 @@ const styles = StyleSheet.create({
     padding: 10,
   },
   stickerTitle: { fontSize: 10, marginTop: 4, maxWidth: 80 },
+  emojiChipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    paddingHorizontal: 6,
+    paddingBottom: 8,
+    gap: 6,
+  },
+  emojiChip: {
+    borderRadius: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    backgroundColor: 'rgba(0,0,0,0.05)',
+  },
+  emojiChipActive: {
+    backgroundColor: '#00A884',
+  },
+  emojiChipLabel: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: '#667781',
+  },
+  emojiChipLabelActive: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+  },
+  emojiCell: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 6,
+    paddingHorizontal: 2,
+  },
+  emojiChar: {
+    fontSize: 26,
+  },
 });

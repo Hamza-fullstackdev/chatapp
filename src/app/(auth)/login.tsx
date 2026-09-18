@@ -2,6 +2,7 @@ import { Alert, KeyboardAvoidingView, Pressable, StyleSheet, Text, TextInput, Vi
 import { useState } from 'react';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { Image } from 'expo-image';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '@/context/auth-context';
 import { useWaTheme } from '@/context/theme-context';
@@ -34,7 +35,7 @@ export default function LoginScreen() {
       <KeyboardAvoidingView style={styles.flex} behavior="padding">
         <View style={styles.header}>
           <View style={styles.logoWrap}>
-            <Ionicons name="chatbubble-ellipses" size={68} color="#FFFFFF" />
+            <Image source={require('@/assets/images/launcher.png')} style={styles.logo} contentFit="cover" />
           </View>
           <Text style={styles.title}>chat-app</Text>
           <Text style={styles.subtitle}>Sign in with your account</Text>
@@ -114,9 +115,15 @@ const styles = StyleSheet.create({
     height: 112,
     borderRadius: 56,
     backgroundColor: 'rgba(255,255,255,0.22)',
+    overflow: 'hidden',
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 14,
+  },
+  logo: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 56,
   },
   title: {
     fontSize: 26,
