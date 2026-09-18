@@ -84,11 +84,26 @@ function rowToConversation(row: ConversationRow): ConversationDTO {
 
 export async function upsertConversation(db: SQLiteDatabase, c: ConversationDTO): Promise<void> {
   await db.runAsync(
-    `INSERT OR REPLACE INTO conversations (
+    `INSERT INTO conversations (
       id, type, name, avatar_url, other_user_id, other_user_name, other_user_avatar_url,
       last_message_id, last_message_type, last_message_text, last_message_sender_id,
       last_message_created_at, last_message_has_attachments, unread_count, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      type = excluded.type,
+      name = excluded.name,
+      avatar_url = excluded.avatar_url,
+      other_user_id = excluded.other_user_id,
+      other_user_name = excluded.other_user_name,
+      other_user_avatar_url = excluded.other_user_avatar_url,
+      last_message_id = excluded.last_message_id,
+      last_message_type = excluded.last_message_type,
+      last_message_text = excluded.last_message_text,
+      last_message_sender_id = excluded.last_message_sender_id,
+      last_message_created_at = excluded.last_message_created_at,
+      last_message_has_attachments = excluded.last_message_has_attachments,
+      unread_count = excluded.unread_count,
+      updated_at = excluded.updated_at`,
     c.id,
     c.type,
     c.name,
@@ -317,6 +332,13 @@ export async function setMessageStatus(
   status: string,
 ): Promise<void> {
   await db.runAsync('UPDATE messages SET status = ? WHERE id = ?', status, id);
+}
+
+export async function setMessageDelivered(db: SQLiteDatabase, id: string): Promise<void> {
+  await db.runAsync(
+    "UPDATE messages SET status = 'delivered' WHERE id = ? AND status NOT IN ('read', 'failed')",
+    id,
+  );
 }
 
 export async function setMessageReadStatus(

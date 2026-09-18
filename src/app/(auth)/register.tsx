@@ -1,14 +1,12 @@
-import { Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, KeyboardAvoidingView, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useState } from 'react';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useAuth } from '@/context/auth-context';
 import { useWaTheme } from '@/context/theme-context';
 import { authApi } from '@/lib/api';
 
 export default function RegisterScreen() {
-  const { completeAuth } = useAuth();
   const { colors, dark } = useWaTheme();
   const [name, setName] = useState('');
   const [username, setUsername] = useState('');
@@ -24,13 +22,13 @@ export default function RegisterScreen() {
     }
     setBusy(true);
     try {
-      const { token, refreshToken, user } = await authApi.register({
+      await authApi.register({
         name: name.trim(),
         username: username.trim(),
         code: code.trim() || '1234',
         email: email.trim() || undefined,
       });
-      await completeAuth(token, user, refreshToken);
+      router.replace('/login');
     } catch (e) {
       Alert.alert('Registration failed', e instanceof Error ? e.message : 'Could not create account');
     } finally {
@@ -40,10 +38,7 @@ export default function RegisterScreen() {
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: dark ? colors.background : colors.brandDark }]}>
-      <KeyboardAvoidingView
-        style={styles.flex}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      >
+      <KeyboardAvoidingView style={styles.flex} behavior="padding">
         <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
           <View style={styles.header}>
             <Pressable hitSlop={10} onPress={() => router.back()} style={styles.backBtn}>

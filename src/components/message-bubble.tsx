@@ -15,6 +15,26 @@ interface MessageBubbleProps {
   replyPreview?: { senderId: string; text: string | null; type: string } | null;
   onFailedRetry?: () => void;
   onLongPress?: (message: MessageDTO) => void;
+  onOpenMedia?: (attachment: AttachmentDTO) => void;
+}
+
+/**
+ * Delivery tick, WhatsApp-style:
+ *  - single grey check  = sent
+ *  - double grey check  = delivered to the other device
+ *  - double blue check  = read
+ */
+function Tick({ status }: { status: string }) {
+  if (status === 'failed') {
+    return <Ionicons name="alert-circle" size={16} color="#E5423D" />;
+  }
+  if (status === 'read') {
+    return <Ionicons name="checkmark-done" size={14} color="#34B7F1" />;
+  }
+  if (status === 'delivered') {
+    return <Ionicons name="checkmark-done" size={14} color="#88929E" />;
+  }
+  return <Ionicons name="checkmark" size={14} color="#88929E" />;
 }
 
 function AttachmentMedia({ attachment, isOwn }: { attachment: AttachmentDTO; isOwn: boolean }) {
@@ -38,8 +58,7 @@ function AttachmentMedia({ attachment, isOwn }: { attachment: AttachmentDTO; isO
     if (!url) {
       return <View style={[styles.mediaPlaceholder, { backgroundColor: colors.divider }]} />;
     }
-    const base = styles.mediaImage;
-    return <Image source={{ uri: url }} style={base} contentFit="cover" transition={100} />;
+    return <Image source={{ uri: url }} style={styles.mediaImage} contentFit="cover" transition={100} />;
   }
 
   const name =
@@ -68,8 +87,78 @@ export function MessageBubble({
   replyPreview,
   onFailedRetry,
   onLongPress,
+  onOpenMedia,
 }: MessageBubbleProps) {
   const { colors } = useWaTheme();
+
+  const images = message.attachments.filter((a) => a.type === 'image' || a.type === 'gif');
+  const stickers = message.attachments.filter((a) => a.type === 'sticker');
+  const others = message.attachments.filter((a) => a.type === 'video' || a.type === 'audio' || a.type === 'file');
+
+  // When an image is the whole message, overlay the timestamp on the photo
+  // corner like WhatsApp instead of a separate row underneath it.
+  const overlayTime = images.length > 0 && !message.text && message.reactions.length === 0 && !message.editedAt;
+
+  const metaRow = (
+    <View style={styles.metaRow}>
+      {message.editedAt && !message.deletedAt ? (
+        <Text style={[styles.edited, { color: colors.textSecondary }]}>edited</Text>
+      ) : null}
+      {message.reactions.length > 0 && !message.deletedAt ? (
+        <View style={styles.reactionPills}>
+          {Object.entries(
+            message.reactions.reduce<Record<string, number>>((acc, r) => {
+              acc[r.emoji] = (acc[r.emoji] ?? 0) + 1;
+              return acc;
+            }, {}),
+          ).map(([emoji, count]) => (
+            <View key={emoji} style={styles.reactionPill}>
+              <Text style={styles.reactionEmoji}>{emoji}</Text>
+              {count > 1 && <Text style={[styles.reactionCount, { color: colors.textSecondary }]}>{count}</Text>}
+            </View>
+          ))}
+        </View>
+      ) : null}
+      <Text style={[styles.time, { color: colors.textSecondary }]}>{formatMessageTime(message.createdAt)}</Text>
+      {isOwn && message.status === 'failed' && onFailedRetry ? (
+        <Pressable hitSlop={8} onPress={onFailedRetry} style={styles.tick}>
+          <Ionicons name="alert-circle" size={16} color="#E5423D" />
+        </Pressable>
+      ) : isOwn ? (
+        <View style={styles.tick}>
+          <Tick status={message.status} />
+        </View>
+      ) : null}
+    </View>
+  );
+
+  const mediaStack = (list: AttachmentDTO[], overlayOnLast: boolean) =>
+    list.map((a, index) => {
+      const isLast = index === list.length - 1;
+      const media = <AttachmentMedia key={a.id} attachment={a} isOwn={isOwn} />;
+      const wrapped = onOpenMedia ? (
+        <Pressable
+          key={a.id}
+          onPress={() => onOpenMedia(a)}
+          style={({ pressed }) => pressed && { opacity: 0.85 }}
+        >
+          {media}
+        </Pressable>
+      ) : (
+        media
+      );
+      return (
+        <View key={a.id} style={styles.mediaBox}>
+          {wrapped}
+          {isLast && overlayOnLast && (
+            <View style={styles.metaOverlay}>
+              <Text style={styles.timeOverlay}>{formatMessageTime(message.createdAt)}</Text>
+              {isOwn && !message.deletedAt && <Tick status={message.status} />}
+            </View>
+          )}
+        </View>
+      );
+    });
 
   const baseContent = (
     <View
@@ -104,74 +193,20 @@ export function MessageBubble({
         </View>
       ) : (
         <>
-          {message.attachments.filter((a) => a.type === 'image' || a.type === 'gif').length > 0 && (
-            <View style={styles.mediaWrap}>
-              {message.attachments
-                .filter((a) => a.type === 'image' || a.type === 'gif')
-                .map((a) => (
-                  <AttachmentMedia key={a.id} attachment={a} isOwn={isOwn} />
-                ))}
-            </View>
-          )}
-          {message.attachments.some((a) => a.type === 'sticker') && (
-            <View style={styles.mediaWrap}>
-              {message.attachments
-                .filter((a) => a.type === 'sticker')
-                .map((a) => (
-                  <AttachmentMedia key={a.id} attachment={a} isOwn={isOwn} />
-                ))}
-            </View>
-          )}
-          {message.attachments.some((a) => a.type === 'video' || a.type === 'audio' || a.type === 'file') && (
-            <View style={styles.fileWrap}>
-              {message.attachments
-                .filter((a) => a.type === 'video' || a.type === 'audio' || a.type === 'file')
-                .map((a) => (
-                  <AttachmentMedia key={a.id} attachment={a} isOwn={isOwn} />
-                ))}
-            </View>
+          {images.length > 0 && <View style={styles.mediaWrap}>{mediaStack(images, overlayTime)}</View>}
+          {stickers.length > 0 && <View style={styles.mediaWrap}>{mediaStack(stickers, false)}</View>}
+          {others.length > 0 && (
+            <View style={styles.fileWrap}>{mediaStack(others, false)}</View>
           )}
           {message.text ? (
             <Text style={[styles.text, { color: colors.text }]} selectable>
               {message.text}
             </Text>
           ) : null}
+          {!overlayTime && !message.deletedAt && metaRow}
+          {!overlayTime && message.deletedAt && <View style={styles.deletedEnd} />}
         </>
       )}
-
-      <View style={styles.metaRow}>
-        {message.editedAt && !message.deletedAt ? (
-          <Text style={[styles.edited, { color: colors.textSecondary }]}>edited</Text>
-        ) : null}
-        {message.reactions.length > 0 && !message.deletedAt ? (
-          <View style={styles.reactionPills}>
-            {Object.entries(
-              message.reactions.reduce<Record<string, number>>((acc, r) => {
-                acc[r.emoji] = (acc[r.emoji] ?? 0) + 1;
-                return acc;
-              }, {}),
-            ).map(([emoji, count]) => (
-              <View key={emoji} style={styles.reactionPill}>
-                <Text style={styles.reactionEmoji}>{emoji}</Text>
-                {count > 1 && <Text style={[styles.reactionCount, { color: colors.textSecondary }]}>{count}</Text>}
-              </View>
-            ))}
-          </View>
-        ) : null}
-        <Text style={[styles.time, { color: colors.textSecondary }]}>{formatMessageTime(message.createdAt)}</Text>
-        {isOwn && message.status === 'failed' && onFailedRetry ? (
-          <Pressable hitSlop={8} onPress={onFailedRetry} style={styles.tick}>
-            <Ionicons name="alert-circle" size={16} color="#E5423D" />
-          </Pressable>
-        ) : isOwn ? (
-          <Ionicons
-            name={message.status === 'read' ? 'checkmark-done' : 'checkmark'}
-            size={14}
-            color={message.status === 'read' ? '#34B7F1' : colors.textSecondary}
-            style={styles.tick}
-          />
-        ) : null}
-      </View>
     </View>
   );
 
@@ -202,6 +237,7 @@ const styles = StyleSheet.create({
   },
   bubble: {
     maxWidth: '82%',
+    minWidth: 96,
     borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 6,
@@ -241,17 +277,36 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     maxWidth: 240,
   },
+  mediaBox: {
+    marginBottom: 4,
+    borderRadius: 6,
+    overflow: 'hidden',
+  },
   mediaImage: {
     width: 220,
     height: 220,
     borderRadius: 6,
-    marginBottom: 4,
   },
   mediaPlaceholder: {
     width: 220,
     height: 220,
     borderRadius: 6,
-    marginBottom: 4,
+  },
+  metaOverlay: {
+    position: 'absolute',
+    bottom: 10,
+    right: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    borderRadius: 8,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  timeOverlay: {
+    fontSize: 11,
+    color: '#FFFFFF',
   },
   fileWrap: {
     maxWidth: 220,
@@ -282,6 +337,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'flex-end',
+    flexWrap: 'wrap',
+    gap: 4,
     marginTop: 2,
   },
   reactionPills: {
@@ -310,5 +367,10 @@ const styles = StyleSheet.create({
   },
   tick: {
     marginLeft: 3,
+    width: 16,
+    alignItems: 'center',
+  },
+  deletedEnd: {
+    height: 4,
   },
 });

@@ -4,7 +4,6 @@ import {
   getSyncCursor,
   setMessageReactions,
   setSyncCursor,
-  softDeleteMessage,
   updateConversationInfo,
   upsertConversation,
   upsertMessage,
@@ -45,8 +44,7 @@ async function applyChange(db: Awaited<ReturnType<typeof getDb>>, change: SyncCh
           break;
         case 'delete': {
           const id = String(payload.id ?? change.entityId);
-          const deletedAt = String(payload.deletedAt ?? new Date().toISOString());
-          await softDeleteMessage(db, id, deletedAt);
+          await deleteMessageRow(db, id);
           break;
         }
         case 'reaction': {

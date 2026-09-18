@@ -1,8 +1,8 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   ActivityIndicator,
-  FlatList,
   Pressable,
+  SectionList,
   StyleSheet,
   Text,
   TextInput,
@@ -11,7 +11,8 @@ import {
 import { router, Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { Avatar } from '@/components/avatar';
-import { useContacts } from '@/hooks/use-data';
+import { useAuth } from '@/context/auth-context';
+import { useContacts, useConversations } from '@/hooks/use-data';
 import { conversationsApi } from '@/lib/api';
 import { useWaTheme } from '@/context/theme-context';
 import type { UserDTO } from '@/types/api';
@@ -31,9 +32,32 @@ function HeaderRight() {
 
 export default function ContactsScreen() {
   const { colors } = useWaTheme();
+  const { user } = useAuth();
   const [search, setSearch] = useState('');
   const { data: users, loading, error, refresh } = useContacts(search);
+  const { data: conversations } = useConversations(user?.id ?? '', true);
   const [starting, setStarting] = useState<string | null>(null);
+
+  // Users already in a private conversation show under "Existing users".
+  const existingIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const c of conversations ?? []) {
+      if (c.type === 'private' && c.otherUserId) ids.add(c.otherUserId);
+    }
+    return ids;
+  }, [conversations]);
+
+  const sections = useMemo(() => {
+    if (search.trim()) {
+      return [{ title: 'Results', data: users ?? [] }];
+    }
+    const existing = (users ?? []).filter((u) => existingIds.has(u.id));
+    const all = (users ?? []).filter((u) => !existingIds.has(u.id));
+    const out: { title: string; data: UserDTO[] }[] = [];
+    if (existing.length > 0) out.push({ title: 'Existing users', data: existing });
+    out.push({ title: 'All users', data: all });
+    return out;
+  }, [users, existingIds, search]);
 
   const openChat = async (userId: string) => {
     if (starting) return;
@@ -42,6 +66,9 @@ export default function ContactsScreen() {
       const { conversation } = await conversationsApi.createPrivate(userId);
       router.push({ pathname: '/chat/[id]', params: { id: conversation.id } });
     } catch {
+      // Fall through: loader stays visible briefly so the tap is noticeable,
+      // then reverts so the user can retry.
+    } finally {
       setStarting(null);
     }
   };
@@ -96,10 +123,16 @@ export default function ContactsScreen() {
           <Text style={[styles.errorDetail, { color: colors.textSecondary }]}>{error}</Text>
         </View>
       ) : (
-        <FlatList
-          data={users ?? []}
+        <SectionList
+          sections={sections}
           keyExtractor={(u) => u.id}
           renderItem={renderItem}
+          renderSectionHeader={({ section }) => (
+            <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>
+              {section.title}
+            </Text>
+          )}
+          stickySectionHeadersEnabled={false}
           ItemSeparatorComponent={() => <View style={[styles.separator, { backgroundColor: colors.divider }]} />}
           contentContainerStyle={styles.listContent}
           ListEmptyComponent={
@@ -137,6 +170,14 @@ const styles = StyleSheet.create({
   },
   listContent: {
     paddingVertical: 4,
+  },
+  sectionHeader: {
+    fontSize: 13,
+    fontWeight: '600',
+    paddingHorizontal: 14,
+    paddingTop: 14,
+    paddingBottom: 4,
+    backgroundColor: 'transparent',
   },
   row: {
     flexDirection: 'row',

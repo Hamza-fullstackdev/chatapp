@@ -198,6 +198,12 @@ export interface MessageReadEvent {
   readAt: string;
 }
 
+export interface MessageDeliveredEvent {
+  conversationId: string;
+  messageId: string;
+  deliveredAt: string;
+}
+
 export interface GroupUpdateEvent {
   conversationId: string;
   kind?: string;

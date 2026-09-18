@@ -28,21 +28,27 @@ import { ApiError } from '@/lib/api-client';
 import { joinConversation, leaveConversation, sendMessageRead, sendTyping } from '@/lib/socket';
 import { getDb } from '@/db/database';
 import {
+  listAllMessageIds,
   listMessages,
   markConversationRead,
+  getConversation,
+  setMessageDelivered as persistDelivered,
   setMessageReadStatus as persistRead,
   setMessageReactions as persistReactions,
-  softDeleteMessage as persistDelete,
+  deleteMessageRow as persistDelete,
   upsertMessage as persistMessage,
   upsertConversation as persistConversation,
 } from '@/db/repositories';
-import { uploadAsset, fileNameFromUri } from '@/lib/media';
+import { getAttachmentUrl, uploadAsset, fileNameFromUri } from '@/lib/media';
 import { MessageBubble } from '@/components/message-bubble';
 import { MessageActionsSheet } from '@/components/message-actions-sheet';
 import { BUILTIN_GIFS, BUILTIN_STICKERS } from '@/constants/media-sources';
 import type {
+  AttachmentDTO,
   ConversationDetailDTO,
+  ConversationDTO,
   MessageDTO,
+  MessageDeliveredEvent,
   MessageReadEvent,
   PresenceUpdateEvent,
   TypingUpdateEvent,
@@ -142,6 +148,7 @@ export default function ChatScreen() {
   const myId = user?.id ?? '';
 
   const [detail, setDetail] = useState<ConversationDetailDTO | null>(null);
+  const [localConv, setLocalConv] = useState<ConversationDTO | null>(null);
   const [base, setBase] = useState<MessageDTO[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -160,6 +167,17 @@ export default function ChatScreen() {
   const [addMenu, setAddMenu] = useState(false);
   const [stickerModal, setStickerModal] = useState(false);
 
+  const [mediaPreview, setMediaPreview] = useState<{
+    uri: string;
+    type: 'image' | 'video';
+    mimeType?: string;
+    width?: number;
+    height?: number;
+  } | null>(null);
+  const [previewCaption, setPreviewCaption] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [viewer, setViewer] = useState<AttachmentDTO | null>(null);
+
   const typingTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const lastReadSent = useRef('');
   const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -170,11 +188,12 @@ export default function ChatScreen() {
   const messages = useMemo(() => mergeBase(base, optimistic), [base, optimistic]);
 
   const { conversation } = detail ?? {};
-  const isGroup = conversation?.type === 'group';
+  const conv = conversation ?? localConv;
+  const isGroup = conv?.type === 'group';
   const amAdmin = isGroup
     ? (detail?.members.some((m) => m.id === myId && m.role === 'admin') ?? false)
     : false;
-  const otherUserId = conversation?.otherUserId ?? null;
+  const otherUserId = conv?.otherUserId ?? null;
   const peerOnline = otherUserId ? peers[otherUserId] === true : false;
 
   const messageById = useMemo(() => {
@@ -184,8 +203,8 @@ export default function ChatScreen() {
   }, [messages]);
 
   const title = isGroup
-    ? conversation?.name ?? 'Group'
-    : conversation?.otherUserName ?? 'Chat';
+    ? conv?.name ?? 'Group'
+    : conv?.otherUserName ?? 'Chat';
   const subtitle = pendingCount > 0
     ? `${pendingCount} pending…`
     : isGroup
@@ -195,38 +214,53 @@ export default function ChatScreen() {
         : 'last seen recently';
 
   // ------------------------------------------------------------------
-  // Initial load: seed from SQLite, then refresh detail from the API
+  // Initial load: show the cached copy from SQLite instantly, then
+  // refresh detail + messages from the API in the background.
   // ------------------------------------------------------------------
   useEffect(() => {
     let active = true;
     (async () => {
-      setLoading(true);
-      setError(null);
       try {
         const db = await getDb();
-        const rows = await listMessages(db, conversationId, { limit: 100 });
+        const [rows, conv] = await Promise.all([
+          listMessages(db, conversationId, { limit: 100 }),
+          getConversation(db, conversationId),
+        ]);
+        if (!active) return;
+        setBase(rows);
+        setLocalConv(conv);
+        setLoading(false);
+        void markConversationRead(db, conversationId);
+      } catch (e) {
         if (active) {
-          setBase(rows);
-          await markConversationRead(db, conversationId);
+          setLoading(false);
+          setError(e instanceof Error ? e.message : 'Could not load conversation');
         }
+      }
+    })();
 
+    (async () => {
+      try {
         const loaded = await conversationsApi.detail(conversationId);
         if (!active) return;
         setDetail(loaded);
+        setLocalConv(loaded.conversation);
+        const db = await getDb();
         await persistConversation(db, loaded.conversation);
         if (loaded.messages.length > 0) {
           const fresh = loaded.messages
             .slice()
             .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
           setBase((prev) => mergeBase(fresh, prev));
-          for (const m of fresh.slice(0, 200)) void persistMessage(db, m);
+          const existing = new Set(await listAllMessageIds(db, conversationId));
+          const missing = fresh.filter((m) => !existing.has(m.id)).slice(0, 200);
+          for (const m of missing) await persistMessage(db, m);
         }
-      } catch (e) {
-        if (active) setError(e instanceof Error ? e.message : 'Could not load conversation');
-      } finally {
-        if (active) setLoading(false);
+      } catch {
+        // Best-effort server refresh — the cached copy is already visible.
       }
     })();
+
     return () => {
       active = false;
     };
@@ -248,12 +282,16 @@ export default function ChatScreen() {
     })();
   });
 
-  // Mark everything visible as read when the conversation opens.
+  // Mark everything visible as read when the conversation opens. Read
+  // receipts are only ever sent for the newest *incoming* message — never
+  // for our own messages (otherwise a just-sent message would instantly
+  // show the blue "read" tick).
   useEffect(() => {
     if (messages.length === 0) return;
     const newest = messages[0];
     if (!newest || lastReadSent.current === newest.id) return;
     lastReadSent.current = newest.id;
+    if (newest.senderId === myId) return;
     if (connected) {
       sendMessageRead(conversationId, newest.id);
     } else {
@@ -265,7 +303,7 @@ export default function ChatScreen() {
         createdAt: new Date().toISOString(),
       });
     }
-  }, [messages, conversationId, connected]);
+  }, [messages, conversationId, connected, myId]);
 
   // ------------------------------------------------------------------
   // DB persistence helpers
@@ -327,12 +365,11 @@ export default function ChatScreen() {
     'message:delete',
     (payload) => {
       if (payload.conversationId !== conversationId) return;
-      setBase((prev) =>
-        prev.map((m) => (m.id === payload.id ? { ...m, deletedAt: payload.deletedAt, text: null } : m)),
-      );
+      setBase((prev) => prev.filter((m) => m.id !== payload.id));
+      setOptimistic((prev) => prev.filter((o) => o.id !== payload.id));
       void (async () => {
         const db = await getDb();
-        await persistDelete(db, payload.id, payload.deletedAt);
+        await persistDelete(db, payload.id);
       })();
     },
   );
@@ -361,6 +398,21 @@ export default function ChatScreen() {
     void (async () => {
       const db = await getDb();
       await persistRead(db, conversationId, myId, event.messageId);
+    })();
+  });
+
+  useSocketEvent<MessageDeliveredEvent>('message:delivered', (event) => {
+    if (event.conversationId !== conversationId) return;
+    setBase((prev) =>
+      prev.map((m) =>
+        m.id === event.messageId && m.status !== 'read'
+          ? { ...m, status: 'delivered' }
+          : m,
+      ),
+    );
+    void (async () => {
+      const db = await getDb();
+      await persistDelivered(db, event.messageId);
     })();
   });
 
@@ -497,9 +549,16 @@ export default function ChatScreen() {
   // ------------------------------------------------------------------
   // Edit / delete / react
   // ------------------------------------------------------------------
-  const startEdit = (message: MessageDTO) => {
-    setEditTarget(message);
-    setDraft(message.text ?? '');
+  const startEdit = async (message: MessageDTO) => {
+    if (message.attachments.length > 0) {
+      setEditTarget(message);
+      setPreviewCaption(message.text ?? '');
+      const picked = await pickImage('library');
+      if (!picked) setEditTarget(null);
+    } else {
+      setEditTarget(message);
+      setDraft(message.text ?? '');
+    }
   };
 
   const cancelEdit = () => {
@@ -527,7 +586,7 @@ export default function ChatScreen() {
     );
 
     try {
-      const { message } = await messagesApi.edit(target.id, next);
+      const { message } = await messagesApi.edit(target.id, { text: next });
       setBase((prev) => mergeBase(prev, [message]));
       persist(message);
     } catch (e) {
@@ -550,17 +609,78 @@ export default function ChatScreen() {
     }
   };
 
+  const commitMediaEdit = async (target: MessageDTO, attachment: DraftAttachment) => {
+    const caption = previewCaption.trim();
+    const optimisticEdited: MessageDTO = {
+      ...target,
+      type: attachment.type,
+      text: caption || null,
+      editedAt: new Date().toISOString(),
+      hasAttachments: true,
+      attachments: [
+        {
+          id: Crypto.randomUUID(),
+          type: attachment.type,
+          storagePath: attachment.storagePath ?? null,
+          mimeType: attachment.mimeType ?? null,
+          size: null,
+          width: attachment.width ?? null,
+          height: attachment.height ?? null,
+          durationMs: null,
+          thumbnailPath: null,
+          provider: attachment.provider ?? null,
+          providerId: null,
+          previewUrl: attachment.previewUrl ?? null,
+          gifUrl: attachment.gifUrl ?? null,
+          localUri: attachment.localUri ?? null,
+        },
+      ],
+    };
+    setEditTarget(null);
+    setBase((prev) => prev.map((m) => (m.id === optimisticEdited.id ? optimisticEdited : m)));
+    setOptimistic((prev) => prev.map((o) => (o.id === target.id ? optimisticEdited : o)));
+
+    try {
+      const { message } = await messagesApi.edit(target.id, {
+        text: caption || undefined,
+        attachment: {
+          type: attachment.type,
+          storagePath: attachment.storagePath,
+          mimeType: attachment.mimeType,
+          width: attachment.width,
+          height: attachment.height,
+          gifUrl: attachment.gifUrl,
+          previewUrl: attachment.previewUrl,
+          provider: attachment.provider,
+        },
+      });
+      setBase((prev) => mergeBase(prev, [message]));
+      persist(message);
+    } catch (e) {
+      if (isRetryableError(e)) {
+        void enqueueOp({
+          opId: `edit:${target.id}:${attachment.localUri}`,
+          type: 'EDIT_MESSAGE',
+          clientMessageId: target.id,
+          conversationId,
+          payload: { messageId: target.id, text: caption || undefined },
+          createdAt: new Date().toISOString(),
+        });
+      } else {
+        Alert.alert('Edit failed', e instanceof Error ? e.message : 'Could not replace media');
+        setBase((prev) => mergeBase(prev, [target]));
+      }
+    }
+  };
+
   const removeMessage = async (message: MessageDTO) => {
-    const stamp = new Date().toISOString();
-    setBase((prev) =>
-      prev.map((m) => (m.id === message.id ? { ...m, deletedAt: stamp, text: null } : m)),
-    );
+    setBase((prev) => prev.filter((m) => m.id !== message.id));
     setOptimistic((prev) => prev.filter((o) => o.id !== message.id));
     try {
       await messagesApi.delete(message.id);
       void (async () => {
         const db = await getDb();
-        await persistDelete(db, message.id, stamp);
+        await persistDelete(db, message.id);
       })();
     } catch (e) {
       if (isRetryableError(e)) {
@@ -621,7 +741,7 @@ export default function ChatScreen() {
   // ------------------------------------------------------------------
   // Attachment picks
   // ------------------------------------------------------------------
-  const pickImage = async (source: 'library' | 'camera') => {
+  const pickImage = async (source: 'library' | 'camera'): Promise<boolean> => {
     const launcher =
       source === 'camera'
         ? ImagePicker.launchCameraAsync
@@ -631,28 +751,57 @@ export default function ChatScreen() {
       allowsEditing: false,
       quality: 1,
     });
-    if (result.canceled || result.assets.length === 0) return;
+    if (result.canceled || result.assets.length === 0) return false;
     const asset = result.assets[0]!;
     const isVideo = asset.type === 'video';
-    const contentType = isVideo ? 'video/mp4' : (asset.mimeType ?? 'image/jpeg');
-    const bucket = isVideo ? 'chat-media' : 'chat-media';
+    setMediaPreview({
+      uri: asset.uri,
+      type: isVideo ? 'video' : 'image',
+      mimeType: asset.mimeType ?? undefined,
+      width: asset.width,
+      height: asset.height,
+    });
+    return true;
+  };
+
+  const closePreview = () => {
+    setMediaPreview(null);
+    setPreviewCaption('');
+  };
+
+  const sendPreview = async () => {
+    const item = mediaPreview;
+    if (!item || uploading) return;
+    setUploading(true);
     try {
-      const uploaded = await uploadAsset(bucket, {
-        uri: asset.uri,
+      const isVideo = item.type === 'video';
+      const contentType = item.mimeType ?? (isVideo ? 'video/mp4' : 'image/jpeg');
+      const uploaded = await uploadAsset('chat-media', {
+        uri: item.uri,
         contentType,
-        fileName: asset.fileName ?? undefined,
-        size: asset.fileSize ?? undefined,
+        fileName: undefined,
+        size: undefined,
       });
-      await send({
-        attachment: {
-          ...uploaded.attachment,
-          width: asset.width,
-          height: asset.height,
-          localUri: asset.uri,
-        },
-      });
+      const target = editTarget;
+      const attachment: DraftAttachment = {
+        ...uploaded.attachment,
+        width: item.width,
+        height: item.height,
+        localUri: item.uri,
+      };
+      if (target) {
+        await commitMediaEdit(target, attachment);
+      } else {
+        await send({
+          text: previewCaption.trim() || undefined,
+          attachment,
+        });
+      }
+      closePreview();
     } catch (e) {
       Alert.alert('Upload failed', e instanceof Error ? e.message : 'Could not upload media');
+    } finally {
+      setUploading(false);
     }
   };
 
@@ -755,7 +904,7 @@ export default function ChatScreen() {
         </Pressable>
       </View>
 
-      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <KeyboardAvoidingView style={styles.flex} behavior="padding">
         <FlatList
           data={messages}
           inverted
@@ -775,6 +924,7 @@ export default function ChatScreen() {
                 }
                 onFailedRetry={item.status === 'failed' ? () => retry(item) : undefined}
                 onLongPress={setActionTarget}
+                onOpenMedia={setViewer}
               />
             );
           }}
@@ -808,11 +958,23 @@ export default function ChatScreen() {
                   : `Replying to ${replyTarget?.senderId === myId ? 'you' : 'message'}`}
               </Text>
               <Text style={[styles.chipBody, { color: colors.textSecondary }]} numberOfLines={1}>
-                {editTarget?.text ??
-                  (replyTarget && replyTarget.type !== 'text' ? '📎 Media' : replyTarget?.text)}
+                {editTarget
+                  ? editTarget.text ?? (editTarget.attachments.length > 0 ? '📎 Media' : '')
+                  : replyTarget && replyTarget.type !== 'text'
+                    ? '📎 Media'
+                    : replyTarget?.text}
               </Text>
             </View>
-            <Pressable hitSlop={8} onPress={cancelEdit}>
+            <Pressable
+              hitSlop={8}
+              onPress={() => {
+                if (editTarget) {
+                  cancelEdit();
+                } else {
+                  setReplyTarget(null);
+                }
+              }}
+            >
               <Ionicons name="close" size={18} color={colors.textSecondary} />
             </Pressable>
           </View>
@@ -869,7 +1031,7 @@ export default function ChatScreen() {
         <MessageActionsSheet
           message={actionTarget}
           visible={!!actionTarget}
-          canEdit={actionTarget.senderId === myId && actionTarget.type === 'text' && !actionTarget.deletedAt}
+          canEdit={actionTarget.senderId === myId && !actionTarget.deletedAt}
           canDelete={
             (actionTarget.senderId === myId || (isGroup && amAdmin)) && !actionTarget.deletedAt
           }
@@ -925,6 +1087,21 @@ export default function ChatScreen() {
         onClose={() => setStickerModal(false)}
         onPick={sendGifOrSticker}
       />
+
+      {/* Preview before sending picked media */}
+      {mediaPreview && (
+        <MediaPreviewModal
+          preview={mediaPreview}
+          caption={previewCaption}
+          onChangeCaption={setPreviewCaption}
+          uploading={uploading}
+          onSend={() => void sendPreview()}
+          onClose={closePreview}
+        />
+      )}
+
+      {/* Full-screen media viewer */}
+      {viewer && <ImageViewerModal attachment={viewer} onClose={() => setViewer(null)} />}
     </SafeAreaView>
   );
 }
@@ -1014,9 +1191,155 @@ function GifStickerPicker({
   );
 }
 
+function MediaPreviewModal({
+  preview,
+  caption,
+  onChangeCaption,
+  uploading,
+  onSend,
+  onClose,
+}: {
+  preview: { uri: string; type: 'image' | 'video'; width?: number; height?: number };
+  caption: string;
+  onChangeCaption: (text: string) => void;
+  uploading: boolean;
+  onSend: () => void;
+  onClose: () => void;
+}) {
+  const { colors } = useWaTheme();
+  return (
+    <Modal
+      visible
+      animationType="slide"
+      onRequestClose={uploading ? () => undefined : onClose}
+      statusBarTranslucent
+    >
+      <View style={[styles.previewOverlay, { backgroundColor: '#000000' }]}>
+        <View style={styles.previewHeader}>
+          <Pressable hitSlop={10} onPress={onClose} disabled={uploading}>
+            <Ionicons name="close" size={26} color="#FFFFFF" />
+          </Pressable>
+          <Text style={styles.previewTitle}>
+            {preview.type === 'video' ? 'Video' : 'Image'} preview
+          </Text>
+          <View style={{ width: 26 }} />
+        </View>
+        <View style={styles.previewBody}>
+          {preview.type === 'image' ? (
+            <Image source={{ uri: preview.uri }} style={styles.previewImage} contentFit="contain" />
+          ) : (
+            <View style={styles.previewVideoPlaceholder}>
+              <Ionicons name="videocam" size={56} color="rgba(255,255,255,0.85)" />
+              <Text style={styles.previewVideoText}>Video ready to send</Text>
+            </View>
+          )}
+        </View>
+        <View style={styles.previewFooter}>
+          <TextInput
+            value={caption}
+            onChangeText={onChangeCaption}
+            placeholder="Add a caption…"
+            placeholderTextColor="rgba(255,255,255,0.5)"
+            style={styles.previewInput}
+            multiline
+            editable={!uploading}
+          />
+          <Pressable
+            onPress={onSend}
+            disabled={uploading}
+            style={({ pressed }) => [
+              styles.previewSend,
+              { backgroundColor: pressed ? '#00806b' : colors.brand },
+            ]}
+          >
+            {uploading ? (
+              <ActivityIndicator size="small" color="#FFFFFF" />
+            ) : (
+              <Ionicons name="arrow-up" size={22} color="#FFFFFF" />
+            )}
+          </Pressable>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function ImageViewerModal({
+  attachment,
+  onClose,
+}: {
+  attachment: AttachmentDTO;
+  onClose: () => void;
+}) {
+  const [url, setUrl] = useState<string | null>(
+    attachment.previewUrl ?? attachment.gifUrl ?? attachment.localUri ?? null,
+  );
+
+  useEffect(() => {
+    let active = true;
+    if (!attachment.localUri && !attachment.previewUrl && !attachment.gifUrl) {
+      void getAttachmentUrl(attachment).then((u) => {
+        if (active) setUrl(u);
+      });
+    }
+    return () => {
+      active = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attachment.id, attachment.storagePath]);
+
+  return (
+    <Modal visible animationType="fade" onRequestClose={onClose} statusBarTranslucent>
+      <View style={[styles.previewOverlay, { backgroundColor: '#000000' }]}>
+        <Pressable hitSlop={10} style={styles.viewerClose} onPress={onClose}>
+          <Ionicons name="close" size={28} color="#FFFFFF" />
+        </Pressable>
+        {url ? (
+          <Image source={{ uri: url }} style={styles.previewImage} contentFit="contain" transition={150} />
+        ) : (
+          <View style={styles.viewerLoading}>
+            <ActivityIndicator size="large" color="#FFFFFF" />
+          </View>
+        )}
+      </View>
+    </Modal>
+  );
+}
+
 const styles = StyleSheet.create({
   safe: { flex: 1 },
   flex: { flex: 1 },
+  previewOverlay: { flex: 1, backgroundColor: '#000000' },
+  previewHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  previewTitle: { color: '#FFFFFF', fontSize: 16, fontWeight: '600' },
+  previewBody: { flex: 1, justifyContent: 'center' },
+  previewImage: { flex: 1, width: '100%' },
+  previewVideoPlaceholder: { alignItems: 'center', gap: 12 },
+  previewVideoText: { color: 'rgba(255,255,255,0.7)', fontSize: 14 },
+  previewFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: '#111111',
+  },
+  previewInput: { flex: 1, color: '#FFFFFF', fontSize: 16, padding: 0 },
+  previewSend: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  viewerClose: { position: 'absolute', top: 48, right: 14, zIndex: 2 },
+  viewerLoading: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   center: {
     flex: 1,
     alignItems: 'center',

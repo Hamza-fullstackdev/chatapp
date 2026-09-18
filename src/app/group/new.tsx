@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   FlatList,
+  KeyboardAvoidingView,
   Pressable,
   StyleSheet,
   Text,
@@ -99,6 +100,7 @@ export default function NewGroupScreen() {
         />
       </View>
 
+      <KeyboardAvoidingView style={styles.flex} behavior="padding">
       <Text style={[styles.hint, { color: colors.textSecondary }]}>
         {selected.size > 0 ? `Group will have ${selected.size + 1} members` : 'Select members'}
       </Text>
@@ -142,12 +144,14 @@ export default function NewGroupScreen() {
           keyboardShouldPersistTaps="handled"
         />
       )}
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1 },
+  flex: { flex: 1 },
   header: {
     flexDirection: 'row',
     alignItems: 'center',

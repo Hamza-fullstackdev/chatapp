@@ -14,6 +14,21 @@ import type {
   UserDTO,
 } from '@/types/api';
 
+export type AttachmentPayload = {
+  type: string;
+  storagePath?: string;
+  mimeType?: string;
+  size?: number;
+  width?: number;
+  height?: number;
+  durationMs?: number;
+  thumbnailPath?: string;
+  provider?: string;
+  providerId?: string;
+  previewUrl?: string;
+  gifUrl?: string;
+};
+
 export const authApi = {
   login(identifier: string, code: string): Promise<AuthResponse> {
     return http.post<AuthResponse>('/api/auth/login', { identifier, code });
@@ -98,26 +113,13 @@ export const messagesApi = {
       clientMessageId: string;
       type?: string;
       replyTo?: string;
-      attachment?: {
-        type: string;
-        storagePath?: string;
-        mimeType?: string;
-        size?: number;
-        width?: number;
-        height?: number;
-        durationMs?: number;
-        thumbnailPath?: string;
-        provider?: string;
-        providerId?: string;
-        previewUrl?: string;
-        gifUrl?: string;
-      };
+      attachment?: AttachmentPayload;
     },
   ): Promise<{ message: MessageDTO }> {
     return http.post<{ message: MessageDTO }>(`/api/messages/${conversationId}`, input);
   },
-  edit(messageId: string, text: string): Promise<{ message: MessageDTO }> {
-    return http.patch<{ message: MessageDTO }>(`/api/messages/${messageId}`, { text });
+  edit(messageId: string, input: { text?: string; attachment?: AttachmentPayload }): Promise<{ message: MessageDTO }> {
+    return http.patch<{ message: MessageDTO }>(`/api/messages/${messageId}`, input);
   },
   delete(messageId: string): Promise<{ id: string; conversationId: string; deletedAt: string }> {
     return http.delete<{ id: string; conversationId: string; deletedAt: string }>(

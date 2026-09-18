@@ -34,7 +34,7 @@ function RootNavigator() {
           <Stack.Screen name="chat/[id]" />
           <Stack.Screen name="chat/[id]/group-info" />
           <Stack.Screen name="group/new" />
-          <Stack.Screen name="call/[id]" />
+          <Stack.Screen name="call" />
         </Stack.Protected>
         <Stack.Protected guard={status === 'signedOut'}>
           <Stack.Screen name="(auth)" />
