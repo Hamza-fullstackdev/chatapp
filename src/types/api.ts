@@ -110,6 +110,7 @@ export interface CallDTO {
   peerName: string | null;
   peerAvatarUrl: string | null;
   isOutgoing: boolean;
+  online: boolean;
 }
 
 export interface StickerDTO {

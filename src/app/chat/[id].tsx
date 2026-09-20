@@ -2,10 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Animated,
+  Easing,
   FlatList,
   Keyboard,
   KeyboardAvoidingView,
   Modal,
+  PanResponder,
   Pressable,
   StyleSheet,
   Text,
@@ -14,12 +17,21 @@ import {
 } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import Constants from 'expo-constants';
 import * as Crypto from 'expo-crypto';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
+import {
+  RecordingPresets,
+  requestRecordingPermissionsAsync,
+  setAudioModeAsync,
+  useAudioRecorder,
+  useAudioRecorderState,
+} from 'expo-audio';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Image } from 'expo-image';
 import { useAuth } from '@/context/auth-context';
+import { useCalls } from '@/context/call-context';
 import { useWaTheme } from '@/context/theme-context';
 import { useSocket, useSocketEvent } from '@/context/socket-context';
 import { enqueueOp, useSync, useSyncDb, useSyncFlush } from '@/context/sync-context';
@@ -63,6 +75,7 @@ interface DraftAttachment {
   storagePath?: string;
   width?: number;
   height?: number;
+  durationMs?: number;
   gifUrl?: string;
   previewUrl?: string;
   provider?: string;
@@ -116,7 +129,7 @@ function attachToDto(
           size: null,
           width: draft.attachment.width ?? null,
           height: draft.attachment.height ?? null,
-          durationMs: null,
+          durationMs: draft.attachment.durationMs ?? null,
           thumbnailPath: null,
           provider: draft.attachment.provider ?? null,
           providerId: null,
@@ -144,6 +157,13 @@ function attachToDto(
   };
 }
 
+function formatRecordTime(durationMillis: number): string {
+  const total = Math.max(0, Math.floor(durationMillis / 1000));
+  const mm = Math.floor(total / 60);
+  const ss = total % 60;
+  return `${mm}:${ss.toString().padStart(2, '0')}`;
+}
+
 export default function ChatScreen() {
   const params = useLocalSearchParams<{ id: string }>();
   const conversationId = String(params.id ?? '');
@@ -151,6 +171,7 @@ export default function ChatScreen() {
   const { colors, dark } = useWaTheme();
   const { connected } = useSocket();
   const { pendingCount } = useSync();
+  const { startCall } = useCalls();
 
   const myId = user?.id ?? '';
 
@@ -175,6 +196,7 @@ export default function ChatScreen() {
 
   const [addMenu, setAddMenu] = useState(false);
   const [stickerModal, setStickerModal] = useState(false);
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
 
   const [mediaPreview, setMediaPreview] = useState<{
     uri: string;
@@ -191,6 +213,111 @@ export default function ChatScreen() {
   const lastReadSent = useRef('');
   const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<TextInput>(null);
+
+  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const recorderState = useAudioRecorderState(audioRecorder, 250);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isLocked, setIsLocked] = useState(false);
+  const [isHolding, setIsHolding] = useState(false);
+  const [cancelSwipe, setCancelSwipe] = useState(false);
+
+  // Voice-note animations (WhatsApp-style feedback).
+  const [micScale] = useState(() => new Animated.Value(1)); // mic press feedback
+  const [dotPulse] = useState(() => new Animated.Value(1)); // recording red dot
+  const [lockPop] = useState(() => new Animated.Value(0)); // slide-up lock pop
+  const [cancelPop] = useState(() => new Animated.Value(0)); // slide-left cancel pop
+  const [wave] = useState(() => Array.from({ length: 5 }, () => new Animated.Value(0.35)));
+
+  // Gesture-local refs so the (stable) mic PanResponder always reads fresh
+  // state no matter when events fire mid-gesture.
+  const grantedAtRef = useRef(0);
+  const holdActiveRef = useRef(false);
+  const lockedRef = useRef(false);
+  const cancelGestureRef = useRef(false);
+  const recHandlersRef = useRef<{
+    startRecording: () => void;
+    releaseHeldRecording: () => void;
+    discardRecording: () => void;
+  }>({ startRecording: () => {}, releaseHeldRecording: () => {}, discardRecording: () => {} });
+
+  // Runs when the user lifts their finger (or the move is cancelled). A quick
+  // tap (<250 ms) records nothing — you must press and hold to talk.
+  const finishHoldGesture = (heldMs: number) => {
+    holdActiveRef.current = false;
+    setIsHolding(false);
+    if (cancelGestureRef.current) {
+      cancelGestureRef.current = false;
+      setCancelSwipe(false);
+      void recHandlersRef.current.discardRecording();
+    } else if (!lockedRef.current) {
+      if (heldMs < 250) {
+        void recHandlersRef.current.discardRecording();
+      } else {
+        void recHandlersRef.current.releaseHeldRecording();
+      }
+    }
+  };
+
+  // Stable mic PanResponder. Its callbacks only read mutation-safe refs and
+  // latest closures via recHandlersRef, so it is built once and never rebuilt.
+  /* eslint-disable react-hooks/refs, react-hooks/purity -- this config is an
+     event-handler map; React Native invokes these well outside render. */
+  const recGesture = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: () => true,
+        onPanResponderGrant: () => {
+          grantedAtRef.current = Date.now();
+          cancelGestureRef.current = false;
+          lockedRef.current = false;
+          holdActiveRef.current = true;
+          setIsHolding(true);
+          setIsLocked(false);
+          setCancelSwipe(false);
+          recHandlersRef.current.startRecording();
+        },
+        onPanResponderMove: (_event, gesture) => {
+          // Slide up to "lock" the recording — hands-free.
+          if (!lockedRef.current && gesture.dy < -48) {
+            lockedRef.current = true;
+            setIsLocked(true);
+            setIsHolding(false);
+            return;
+          }
+          // Slide left to arm cancel-on-release.
+          if (!lockedRef.current && gesture.dx < -60) {
+            cancelGestureRef.current = true;
+            setCancelSwipe(true);
+          }
+        },
+        onPanResponderRelease: () => {
+          finishHoldGesture(Date.now() - grantedAtRef.current);
+        },
+        onPanResponderTerminate: () => {
+          finishHoldGesture(Date.now() - grantedAtRef.current);
+        },
+        onPanResponderTerminationRequest: () => false,
+      }),
+    [],
+  );
+  /* eslint-enable react-hooks/refs, react-hooks/purity */
+
+  // Stop any in-progress recording when leaving the conversation so the
+  // microphone is released.
+  useEffect(() => {
+    return () => {
+      try {
+        if (audioRecorder.isRecording) {
+          void audioRecorder.stop().finally(() => {
+            setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true }).catch(() => {});
+          });
+        }
+      } catch {
+        // Ignore — the recorder may already be disposed.
+      }
+    };
+  }, [audioRecorder]);
 
   // ------------------------------------------------------------------
   // Derived state
@@ -245,6 +372,42 @@ export default function ChatScreen() {
   };
   const headerAvatarUri = isGroup ? conv?.avatarUrl : conv?.otherUserAvatarUrl;
   const headerAvatarName = isGroup ? title : conv?.otherUserName ?? title;
+
+  // Enter the multi-select mode from the header menu with an empty selection.
+  const startSelectMessages = () => {
+    setHeaderMenuOpen(false);
+    setSelectMessages(true);
+    setSelectedMessageIds(new Set());
+  };
+
+  // WhatsApp-style header (⋮) menu — only actions backed by existing app
+  // features are listed, so nothing dead-ends.
+  const headerMenuItems = [
+    ...(!isGroup && otherUserId
+      ? [
+          {
+            icon: 'call' as const,
+            label: 'Voice call',
+            action: () => void startCall(otherUserId, 'voice', conversationId),
+          },
+          {
+            icon: 'videocam' as const,
+            label: 'Video call',
+            action: () => void startCall(otherUserId, 'video', conversationId),
+          },
+        ]
+      : []),
+    {
+      icon: 'checkbox' as const,
+      label: 'Select messages',
+      action: startSelectMessages,
+    },
+    {
+      icon: isGroup ? ('people' as const) : ('person' as const),
+      label: isGroup ? 'Group info' : 'View contact',
+      action: openProfile,
+    },
+  ];
 
   // ------------------------------------------------------------------
   // Initial load: show the cached copy from SQLite instantly, then
@@ -512,6 +675,7 @@ export default function ChatScreen() {
               size: undefined,
               width: draft.attachment.width,
               height: draft.attachment.height,
+              durationMs: draft.attachment.durationMs,
               gifUrl: draft.attachment.gifUrl,
               previewUrl: draft.attachment.previewUrl,
               provider: draft.attachment.provider,
@@ -542,10 +706,101 @@ export default function ChatScreen() {
           prev.map((o) => (o.id === cid ? { ...o, status: 'failed' } : o)),
         );
       }
-    } finally {
-      inFlightSends.delete(sig);
+} finally {
+      setUploading(false);
     }
   };
+
+  // Mic button grows while the finger is down and settles back on release.
+  useEffect(() => {
+    Animated.spring(micScale, {
+      toValue: isHolding ? 1.25 : 1,
+      friction: isHolding ? 5 : 6,
+      tension: 200,
+      useNativeDriver: true,
+    }).start();
+  }, [isHolding, micScale]);
+
+  // Red recording dot pulses and the waveform bars dance while recording.
+  useEffect(() => {
+    if (!isRecording) return;
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(dotPulse, {
+          toValue: 0.35,
+          duration: 500,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(dotPulse, {
+          toValue: 1,
+          duration: 500,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [isRecording, dotPulse]);
+
+  useEffect(() => {
+    if (!isRecording) {
+      wave.forEach((w) => w.setValue(0.35));
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.stagger(
+        70,
+        wave.map((w, i) =>
+          Animated.sequence([
+            Animated.timing(w, {
+              toValue: 0.5 + (i % 3) * 0.3,
+              duration: 260 + i * 30,
+              easing: Easing.inOut(Easing.quad),
+              useNativeDriver: true,
+            }),
+            Animated.timing(w, {
+              toValue: 0.35,
+              duration: 260 + i * 30,
+              easing: Easing.inOut(Easing.quad),
+              useNativeDriver: true,
+            }),
+          ]),
+        ),
+      ),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [isRecording, wave]);
+
+  // Slide-up lock feedback: the mic pops into a lock badge.
+  useEffect(() => {
+    if (isLocked) {
+      Animated.spring(lockPop, {
+        toValue: 1,
+        friction: 5,
+        tension: 220,
+        useNativeDriver: true,
+      }).start();
+    } else {
+      lockPop.setValue(0);
+    }
+  }, [isLocked, lockPop]);
+
+  // Slide-left cancel feedback: the close button turns red and pops.
+  useEffect(() => {
+    if (cancelSwipe) {
+      Animated.spring(cancelPop, {
+        toValue: 1,
+        friction: 6,
+        tension: 220,
+        useNativeDriver: true,
+      }).start();
+    } else {
+      cancelPop.setValue(0);
+    }
+  }, [cancelSwipe, cancelPop]);
 
   const sendText = () => {
     if (!draft.trim()) return;
@@ -565,6 +820,7 @@ export default function ChatScreen() {
           ? {
               type: message.attachments[0].type,
               storagePath: message.attachments[0].storagePath ?? undefined,
+              durationMs: message.attachments[0].durationMs ?? undefined,
               gifUrl: message.attachments[0].gifUrl ?? undefined,
               previewUrl: message.attachments[0].previewUrl ?? undefined,
               provider: message.attachments[0].provider ?? undefined,
@@ -582,6 +838,136 @@ export default function ChatScreen() {
     sendTyping(conversationId, true);
     typingTimeout.current = setTimeout(() => sendTyping(conversationId, false), 2000);
   };
+
+  // ------------------------------------------------------------------
+  // Voice notes
+  // ------------------------------------------------------------------
+  const resetAudioMode = () => {
+    setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true }).catch(() => {});
+  };
+
+  const startRecording = async () => {
+    if (isRecording || uploading) return;
+    setStickerModal(false);
+    Keyboard.dismiss();
+    const { granted } = await requestRecordingPermissionsAsync();
+    if (!granted) {
+      holdActiveRef.current = false;
+      setIsHolding(false);
+      Alert.alert('Microphone permission needed', 'Allow microphone access to send voice messages.');
+      return;
+    }
+    try {
+      setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true }).catch(() => {});
+      await audioRecorder.prepareToRecordAsync();
+      audioRecorder.record();
+      setIsRecording(true);
+      // The user let go before the mic finished starting → stop immediately
+      // so a silent ghost recording is never left behind.
+      if (!holdActiveRef.current) {
+        await audioRecorder.stop().catch(() => {});
+        setIsRecording(false);
+        resetAudioMode();
+      }
+    } catch (e) {
+      holdActiveRef.current = false;
+      setIsHolding(false);
+      Alert.alert('Could not start recording', e instanceof Error ? e.message : 'Please try again.');
+    }
+  };
+
+  // Discard the current recording entirely (cancel button, swipe-left, or a
+  // too-quick tap).
+  const discardRecording = async () => {
+    if (!isRecording) return;
+    try {
+      await audioRecorder.stop();
+    } catch {
+      // Ignore — just leave recording mode.
+    }
+    resetAudioMode();
+    setIsHolding(false);
+    setIsLocked(false);
+    setIsRecording(false);
+    setCancelSwipe(false);
+  };
+
+  // The user released the mic without locking: stop recording and keep the
+  // "ready to send" bar (cancel + send) visible, WhatsApp-style.
+  const releaseHeldRecording = async () => {
+    if (!isRecording) return;
+    try {
+      await audioRecorder.stop();
+    } catch {
+      // Ignore — still show the ready bar.
+    }
+    resetAudioMode();
+    setIsHolding(false);
+    setIsLocked(false);
+  };
+
+  // Stop recording, upload the captured audio to storage and send it as a
+  // voice-note message with its duration attached.
+  const sendRecording = async () => {
+    if (!isRecording || uploading) return;
+    const secs = audioRecorder.currentTime ?? recorderState.durationMillis / 1000;
+    try {
+      await audioRecorder.stop();
+    } catch (e) {
+      resetAudioMode();
+      setIsRecording(false);
+      setIsHolding(false);
+      setIsLocked(false);
+      Alert.alert('Recording failed', e instanceof Error ? e.message : 'Please try again.');
+      return;
+    }
+    const uri = audioRecorder.uri ?? null;
+    setIsRecording(false);
+    setIsHolding(false);
+    setIsLocked(false);
+    setCancelSwipe(false);
+    resetAudioMode();
+    if (!uri) {
+      Alert.alert('Recording failed', 'No audio was captured. Please try again.');
+      return;
+    }
+    const durationMs = Math.max(0, Math.round(secs * 1000));
+    setUploading(true);
+    try {
+      const uploaded = await uploadAsset(
+        'chat-media',
+        {
+          uri,
+          contentType: 'audio/mp4',
+          fileName: 'voice-note.m4a',
+          size: undefined,
+        },
+        { durationMs },
+      );
+      await send({
+        type: 'audio',
+        attachment: {
+          ...uploaded.attachment,
+          localUri: uri,
+        },
+      });
+    } catch (e) {
+      Alert.alert('Send failed', e instanceof Error ? e.message : 'Could not upload the voice message.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  // Keep the (stable) mic PanResponder pointing at the latest handler
+  // closures. Without this the gesture only calls no-op stubs and the
+  // microphone never actually starts recording.
+  useEffect(() => {
+    recHandlersRef.current = {
+      startRecording: () => void startRecording(),
+      releaseHeldRecording: () => void releaseHeldRecording(),
+      discardRecording: () => void discardRecording(),
+    };
+  });
 
   // ------------------------------------------------------------------
   // Edit / delete / react
@@ -671,7 +1057,7 @@ export default function ChatScreen() {
           size: null,
           width: attachment.width ?? null,
           height: attachment.height ?? null,
-          durationMs: null,
+          durationMs: attachment.durationMs ?? null,
           thumbnailPath: null,
           provider: attachment.provider ?? null,
           providerId: null,
@@ -694,6 +1080,7 @@ export default function ChatScreen() {
           mimeType: attachment.mimeType,
           width: attachment.width,
           height: attachment.height,
+          durationMs: attachment.durationMs,
           gifUrl: attachment.gifUrl,
           previewUrl: attachment.previewUrl,
           provider: attachment.provider,
@@ -1148,10 +1535,19 @@ export default function ChatScreen() {
               </View>
             </View>
           </Pressable>
+          {!isGroup && otherUserId && (
+            <Pressable
+              hitSlop={10}
+              style={styles.headerBtn}
+              onPress={() => void startCall(otherUserId, 'voice', conversationId)}
+            >
+              <Ionicons name="call" size={20} color="#FFFFFF" />
+            </Pressable>
+          )}
           <Pressable
             hitSlop={10}
             style={styles.headerBtn}
-            onPress={openProfile}
+            onPress={() => setHeaderMenuOpen(true)}
           >
             <Ionicons name="ellipsis-vertical" size={20} color="#FFFFFF" />
           </Pressable>
@@ -1239,53 +1635,165 @@ export default function ChatScreen() {
           </View>
         )}
 
+        {/* Hold-to-record tip while the mic is pressed and not yet locked */}
+        {isHolding && !isLocked && (
+          <View style={[styles.holdTip, { backgroundColor: colors.text }]}>
+            <Ionicons
+              name={cancelSwipe ? 'arrow-back' : 'mic'}
+              size={12}
+              color={colors.incomingBubble}
+            />
+            <Text
+              style={[styles.holdTipText, { color: colors.incomingBubble }]}
+              numberOfLines={1}
+            >
+              {cancelSwipe
+                ? 'Release to cancel'
+                : 'Release to send · slide up to lock · slide left to cancel'}
+            </Text>
+          </View>
+        )}
+
         {/* Input bar */}
         <View style={[styles.inputBar, { backgroundColor: colors.incomingBubble }]}>
-          <Pressable hitSlop={8} onPress={() => setAddMenu(true)} style={styles.addBtn}>
-            <Ionicons name="add" size={26} color={colors.brand} />
-          </Pressable>
-          <View style={[styles.inputPill, { backgroundColor: dark ? 'rgba(134,150,160,0.22)' : 'rgba(0,0,0,0.05)' }]}>
-            <Pressable hitSlop={8} onPress={() => setStickerModal(true)} style={styles.emojiBtn}>
-              <Ionicons name="happy" size={24} color={colors.brand} />
-            </Pressable>
-            <TextInput
-              ref={inputRef}
-              value={draft}
-              onChangeText={onChangeDraft}
-              placeholder={editTarget ? 'Edit message' : 'Message'}
-              placeholderTextColor={colors.textSecondary}
-              multiline
-              style={[styles.input, { color: colors.text }]}
-              onSubmitEditing={() => (editTarget ? commitEdit() : sendText())}
-              blurOnSubmit={false}
-            />
-            {editTarget ? (
+          {isRecording ? (
+            <View
+              style={[
+                styles.inputPill,
+                isLocked
+                  ? { backgroundColor: dark ? 'rgba(0,168,132,0.26)' : 'rgba(0,168,132,0.14)' }
+                  : { backgroundColor: dark ? 'rgba(134,150,160,0.22)' : 'rgba(0,0,0,0.05)' },
+              ]}
+            >
               <Pressable
-                onPress={commitEdit}
-                disabled={!draft.trim()}
+                hitSlop={8}
+                onPress={() => void discardRecording()}
                 style={({ pressed }) => [
-                  styles.sendBtn,
-                  { backgroundColor: pressed ? '#00806b' : colors.brand },
-                  !draft.trim() && styles.sendBtnDisabled,
+                  styles.recordingCancel,
+                  cancelSwipe && styles.recordingCancelActive,
+                  pressed && styles.recordingCancelPressed,
                 ]}
               >
-                <Ionicons name="checkmark" size={20} color="#FFFFFF" />
+                <Animated.View style={cancelSwipe && { transform: [{ scale: cancelPop }] }}>
+                  <Ionicons
+                    name={cancelSwipe ? 'arrow-back' : 'close'}
+                    size={24}
+                    color={cancelSwipe ? '#FFFFFF' : colors.textSecondary}
+                  />
+                </Animated.View>
               </Pressable>
-            ) : (
+              <View style={styles.recordingInfo}>
+                <Animated.View
+                  style={[styles.recordingDot, { opacity: dotPulse, transform: [{ scale: dotPulse }] }]}
+                />
+                <Text style={[styles.recordingTimer, { color: colors.text }]}>
+                  {formatRecordTime(recorderState.durationMillis)}
+                </Text>
+                <View style={styles.recordingWave}>
+                  {wave.map((w, i) => (
+                    <Animated.View
+                      key={i}
+                      style={[
+                        styles.waveBar,
+                        {
+                          backgroundColor: isLocked ? colors.brand : '#E5423D',
+                          transform: [{ scaleY: w }],
+                        },
+                      ]}
+                    />
+                  ))}
+                </View>
+                <Animated.View
+                  style={[
+                    styles.lockBadge,
+                    { backgroundColor: colors.brand },
+                    { opacity: lockPop, transform: [{ scale: lockPop }] },
+                  ]}
+                >
+                  <Ionicons name="lock-closed" size={11} color="#FFFFFF" />
+                </Animated.View>
+              </View>
+              <Text style={[styles.recordingHint, { color: colors.textSecondary }]} numberOfLines={1}>
+                {isLocked ? 'Tap send when done' : cancelSwipe ? 'Release to cancel' : 'Voice message'}
+              </Text>
               <Pressable
-                onPress={sendText}
-                disabled={!draft.trim()}
+                onPress={() => void sendRecording()}
                 style={({ pressed }) => [
                   styles.sendBtn,
                   { backgroundColor: pressed ? '#00806b' : colors.brand },
-                  !draft.trim() && styles.sendBtnDisabled,
                 ]}
               >
                 <Ionicons name="arrow-up" size={20} color="#FFFFFF" />
               </Pressable>
-            )}
-          </View>
+            </View>
+          ) : (
+            <>
+              <Pressable hitSlop={8} onPress={() => setAddMenu(true)} style={styles.addBtn}>
+                <Ionicons name="add" size={26} color={colors.brand} />
+              </Pressable>
+              <View style={[styles.inputPill, { backgroundColor: dark ? 'rgba(134,150,160,0.22)' : 'rgba(0,0,0,0.05)' }]}>
+                <Pressable hitSlop={8} onPress={() => { Keyboard.dismiss(); setStickerModal(true); }} style={styles.emojiBtn}>
+                  <Ionicons name="happy" size={24} color={colors.brand} />
+                </Pressable>
+                <TextInput
+                  ref={inputRef}
+                  value={draft}
+                  onChangeText={onChangeDraft}
+                  onFocus={() => {
+                    if (stickerModal) setStickerModal(false);
+                  }}
+                  placeholder={editTarget ? 'Edit message' : 'Message'}
+                  placeholderTextColor={colors.textSecondary}
+                  multiline
+                  style={[styles.input, { color: colors.text }]}
+                  onSubmitEditing={() => (editTarget ? commitEdit() : sendText())}
+                  blurOnSubmit={false}
+                />
+                {editTarget ? (
+                  <Pressable
+                    onPress={commitEdit}
+                    disabled={!draft.trim()}
+                    style={({ pressed }) => [
+                      styles.sendBtn,
+                      { backgroundColor: pressed ? '#00806b' : colors.brand },
+                      !draft.trim() && styles.sendBtnDisabled,
+                    ]}
+                  >
+                    <Ionicons name="checkmark" size={20} color="#FFFFFF" />
+                  </Pressable>
+                ) : draft.trim() ? (
+                  <Pressable
+                    onPress={sendText}
+                    disabled={!draft.trim()}
+                    style={({ pressed }) => [
+                      styles.sendBtn,
+                      { backgroundColor: pressed ? '#00806b' : colors.brand },
+                      !draft.trim() && styles.sendBtnDisabled,
+                    ]}
+                  >
+                    <Ionicons name="arrow-up" size={20} color="#FFFFFF" />
+                  </Pressable>
+                ) : (
+                  <Animated.View
+                    {...recGesture.panHandlers}
+                    style={[styles.recMicBtn, { transform: [{ scale: micScale }] }]}
+                  >
+                    <Ionicons name="mic" size={22} color={isHolding ? colors.brandDark : colors.brand} />
+                  </Animated.View>
+                )}
+              </View>
+            </>
+          )}
         </View>
+
+        {/* Emoji / GIF / sticker panel — inline so it pushes the input bar
+            up (WhatsApp style) instead of covering it. */}
+        <EmojiStickerGifPicker
+          visible={stickerModal}
+          onClose={() => setStickerModal(false)}
+          onPickEmoji={(char) => setDraft((prev) => prev + char)}
+          onPickItem={sendGifOrSticker}
+        />
       </KeyboardAvoidingView>
 
       {/* Actions sheet after long-press */}
@@ -1342,14 +1850,6 @@ export default function ChatScreen() {
         </Pressable>
       </Modal>
 
-      {/* Emoji / GIF / sticker picker */}
-      <EmojiStickerGifPicker
-        visible={stickerModal}
-        onClose={() => setStickerModal(false)}
-        onPickEmoji={(char) => setDraft((prev) => prev + char)}
-        onPickItem={sendGifOrSticker}
-      />
-
       {/* Preview before sending picked media */}
       {mediaPreview && (
         <MediaPreviewModal
@@ -1365,6 +1865,34 @@ export default function ChatScreen() {
 
       {/* Full-screen media viewer */}
       {viewer && <ImageViewerModal attachment={viewer} onClose={() => setViewer(null)} />}
+
+      {/* Header (⋮) options menu */}
+      <Modal transparent visible={headerMenuOpen} animationType="fade" onRequestClose={() => setHeaderMenuOpen(false)}>
+        <View style={styles.menuOverlay}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setHeaderMenuOpen(false)} />
+          <View
+            style={[
+              styles.menuCard,
+              { backgroundColor: colors.incomingBubble, top: (Constants.statusBarHeight ?? 0) + 52 },
+            ]}
+          >
+            {headerMenuItems.map((item) => (
+              <Pressable
+                key={item.label}
+                hitSlop={6}
+                style={({ pressed }) => [styles.menuItem, pressed && { opacity: 0.6 }]}
+                onPress={() => {
+                  setHeaderMenuOpen(false);
+                  item.action();
+                }}
+              >
+                <Ionicons name={item.icon} size={20} color={colors.brand} />
+                <Text style={[styles.menuLabel, { color: colors.text }]}>{item.label}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -1416,12 +1944,10 @@ function EmojiStickerGifPicker({
     { key: 'sticker' as const, label: 'Stickers' },
   ];
 
+  if (!visible) return null;
   return (
-    <Modal visible={visible} animationType="slide" onRequestClose={onClose} transparent>
-      <View style={styles.stickerOverlay}>
-        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
-        <View style={[styles.stickerSheet, { backgroundColor: colors.incomingBubble }]}>
-          <View style={styles.stickerHeader}>
+    <View style={[styles.stickerSheet, { backgroundColor: colors.incomingBubble }]}>
+      <View style={styles.stickerHeader}>
             <Pressable hitSlop={8} onPress={onClose}>
               <Ionicons name="close" size={22} color={colors.textSecondary} />
             </Pressable>
@@ -1522,9 +2048,7 @@ function EmojiStickerGifPicker({
               )}
             />
           )}
-        </View>
-      </View>
-    </Modal>
+    </View>
   );
 }
 
@@ -1718,6 +2242,29 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 6,
   },
+  menuOverlay: {
+    flex: 1,
+  },
+  menuCard: {
+    position: 'absolute',
+    right: 8,
+    width: 220,
+    borderRadius: 12,
+    paddingVertical: 6,
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOpacity: 0.2,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  menuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  menuLabel: { fontSize: 15, fontWeight: '500' },
   headerBtn: { padding: 8 },
   headerInfo: { flex: 1, marginLeft: 4 },
   headerBody: { flexDirection: 'row', alignItems: 'center', gap: 10 },
@@ -1787,6 +2334,80 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   sendBtnDisabled: { opacity: 0.45 },
+  holdTip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'center',
+    gap: 6,
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    marginBottom: 6,
+  },
+  holdTipText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  recMicBtn: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  recordingCancel: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 18,
+  },
+  recordingCancelActive: {
+    backgroundColor: '#E5423D',
+  },
+  recordingCancelPressed: {
+    transform: [{ scale: 0.88 }],
+  },
+  recordingInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingLeft: 2,
+  },
+  recordingDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#E5423D',
+  },
+  recordingWave: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    height: 26,
+    paddingHorizontal: 2,
+  },
+  waveBar: {
+    width: 3,
+    height: 22,
+    borderRadius: 2,
+  },
+  lockBadge: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  recordingTimer: {
+    fontSize: 15,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+  },
+  recordingHint: {
+    flex: 1,
+    fontSize: 13,
+    textAlign: 'center',
+  },
   overlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.4)',
@@ -1805,11 +2426,6 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
   },
   addLabel: { fontSize: 16 },
-  stickerOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.35)',
-    justifyContent: 'flex-end',
-  },
   stickerSheet: {
     height: 420,
     borderTopLeftRadius: 18,

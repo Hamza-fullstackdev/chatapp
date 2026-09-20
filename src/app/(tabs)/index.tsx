@@ -5,9 +5,10 @@ import {
   Pressable,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { router, Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -27,9 +28,6 @@ function HeaderRight() {
       <Pressable hitSlop={8} style={styles.headerIcon}>
         <Ionicons name="camera-outline" size={22} color={colors.text} />
       </Pressable>
-      <Pressable hitSlop={8} style={styles.headerIcon}>
-        <Ionicons name="search" size={22} color={colors.text} />
-      </Pressable>
       <Pressable hitSlop={8} style={styles.headerIcon} onPress={() => router.push('/settings')}>
         <Ionicons name="ellipsis-vertical" size={22} color={colors.text} />
       </Pressable>
@@ -39,11 +37,21 @@ function HeaderRight() {
 
 export default function ChatsScreen() {
   const { user } = useAuth();
-  const { colors } = useWaTheme();
+  const { colors, dark } = useWaTheme();
   const { data: conversations, loading, error, refresh } = useConversations(user?.id ?? '', true);
 
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [search, setSearch] = useState('');
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return conversations ?? [];
+    return (conversations ?? []).filter((c) => {
+      const title = (c.type === 'group' ? c.name : c.otherUserName) ?? '';
+      return title.toLowerCase().includes(q);
+    });
+  }, [conversations, search]);
 
   const enterSelection = (id: string) => {
     setSelected(new Set([id]));
@@ -140,6 +148,22 @@ export default function ChatsScreen() {
         }}
       />
 
+      {!selectMode && (
+        <View style={[styles.searchWrap, { backgroundColor: colors.background }]}>
+          <View style={[styles.searchBox, { backgroundColor: dark ? colors.divider : '#F0F2F5' }]}>
+            <Ionicons name="search" size={18} color={colors.textSecondary} />
+            <TextInput
+              value={search}
+              onChangeText={setSearch}
+              placeholder="Search"
+              placeholderTextColor={colors.textSecondary}
+              autoCorrect={false}
+              style={[styles.searchInput, { color: colors.text }]}
+            />
+          </View>
+        </View>
+      )}
+
       {loading && conversations == null ? (
         <View style={styles.center}>
           <ActivityIndicator size="large" color={colors.brand} />
@@ -154,15 +178,18 @@ export default function ChatsScreen() {
         </View>
       ) : (
         <FlatList
-          data={conversations ?? []}
+          data={filtered}
           keyExtractor={(c) => c.id}
           renderItem={renderItem}
           ItemSeparatorComponent={() => <View style={[styles.separator, { backgroundColor: colors.divider }]} />}
           contentContainerStyle={[styles.listContent]}
+          keyboardShouldPersistTaps="handled"
           ListEmptyComponent={
             <View style={styles.center}>
               <Text style={[styles.empty, { color: colors.textSecondary }]}>
-                No conversations yet. Use the + button to start one.
+                {search.trim()
+                  ? 'No chats found'
+                  : 'No conversations yet. Use the + button to start one.'}
               </Text>
             </View>
           }
@@ -193,6 +220,22 @@ const styles = StyleSheet.create({
   },
   headerIcon: {
     marginLeft: 18,
+  },
+  searchWrap: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  searchBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 99,
+    paddingHorizontal: 14,
+    height: 44,
+  },
+  searchInput: {
+    flex: 1,
+    marginLeft: 10,
+    fontSize: 16,
   },
   center: {
     flex: 1,

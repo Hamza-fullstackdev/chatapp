@@ -68,7 +68,8 @@
           "cameraPermission": "Allow $(PRODUCT_NAME) to use your camera for video calls.",
           "microphonePermission": "Allow $(PRODUCT_NAME) to use your microphone for voice calls."
         }
-      ]
+      ],
+      "expo-audio"
     ],
     "experiments": {
       "typedRoutes": true,

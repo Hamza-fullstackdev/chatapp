@@ -15,7 +15,7 @@ import {
   type OutboundSignal,
 } from '@/lib/webrtc';
 import { Avatar } from '@/components/avatar';
-import type { CallDTO } from '@/types/api';
+import type { CallDTO, PresenceUpdateEvent } from '@/types/api';
 
 export default function CallScreen() {
   const params = useLocalSearchParams<{ id: string; type?: string }>();
@@ -26,6 +26,7 @@ export default function CallScreen() {
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [connectedText, setConnectedText] = useState('Connecting…');
+  const [peerOnline, setPeerOnline] = useState(false);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -75,6 +76,7 @@ export default function CallScreen() {
       .then(({ call: row }) => {
         if (active) {
           setCall(row);
+          setPeerOnline(row.online);
           setConnectedText(row.status === 'ongoing' ? 'Connected' : 'Ringing…');
         }
       })
@@ -156,6 +158,10 @@ export default function CallScreen() {
     if (event.call.id !== callId) return;
     setConnectedText('Connected');
   });
+  useSocketEvent<PresenceUpdateEvent>('presence:update', (event) => {
+    if (event.userId === peerId) setPeerOnline(event.online);
+  });
+
   useSocketEvent<{ call: CallDTO }>('call:ended', (event) => {
     if (event.call.id !== callId) return;
     endLocal(true);
@@ -191,7 +197,13 @@ export default function CallScreen() {
   const peerName = call?.peerName ?? 'Contact';
 
   const statusLine =
-    call?.status === 'ongoing' || connectedText === 'Connected' ? connectedText : 'Ringing…';
+    call?.status === 'ongoing' || connectedText === 'Connected'
+      ? connectedText
+      : outgoing
+        ? peerOnline
+          ? 'Ringing…'
+          : 'Calling…'
+        : 'Ringing…';
 
   return (
     <SafeAreaView edges={['top', 'bottom']} style={[styles.safe, { backgroundColor: '#0B141A' }]}>
@@ -206,9 +218,7 @@ export default function CallScreen() {
         <View style={styles.center}>
           <Avatar name={peerName} uri={call?.peerAvatarUrl} size={120} />
           <Text style={styles.peerName}>{peerName}</Text>
-          <Text style={styles.statusLine}>
-            {call?.isOutgoing ? `Calling… ${statusLine}` : statusLine}
-          </Text>
+          <Text style={styles.statusLine}>{statusLine}</Text>
         </View>
       )}
 

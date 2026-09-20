@@ -189,6 +189,9 @@ export const callsApi = {
   get(id: string): Promise<{ call: CallDTO }> {
     return http.get<{ call: CallDTO }>(`/api/calls/${id}`);
   },
+  remove(callIds: string[]): Promise<{ deletedIds: string[] }> {
+    return http.post<{ deletedIds: string[] }>('/api/calls/bulk-delete', { callIds });
+  },
   updateStatus(
     id: string,
     status: 'accepted' | 'rejected' | 'ended' | 'cancelled' | 'missed',

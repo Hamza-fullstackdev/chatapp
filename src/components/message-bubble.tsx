@@ -1,11 +1,110 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Animated, PanResponder, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
+import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import type { AttachmentDTO, MessageDTO } from '@/types/api';
 import { formatMessageTime } from '@/lib/format';
 import { useWaTheme } from '@/context/theme-context';
 import { getAttachmentUrl } from '@/lib/media';
+
+function formatPlayDuration(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds));
+  const mm = Math.floor(total / 60);
+  const ss = total % 60;
+  return `${mm}:${ss.toString().padStart(2, '0')}`;
+}
+
+// Only one voice note plays at a time, WhatsApp-style.
+let activePlayback: { key: symbol; pause: () => void } | null = null;
+
+/**
+ * WhatsApp-style voice note: play/pause button, a tappable progress bar and
+ * the elapsed duration. The player instance is owned by the bubble and
+ * released automatically on unmount. The remote file is downloaded first so
+ * seeking is exact and replays work reliably.
+ */
+function AudioPlayerBox({ uri, durationMs }: { uri: string; durationMs?: number | null }) {
+  const { colors } = useWaTheme();
+  const player = useAudioPlayer(uri, { downloadFirst: true, updateInterval: 250 });
+  const status = useAudioPlayerStatus(player);
+  const [trackWidth, setTrackWidth] = useState(0);
+  const boxKey = useRef(Symbol('audio-box'));
+
+  useEffect(() => {
+    const key = boxKey.current;
+    return () => {
+      if (activePlayback?.key === key) activePlayback = null;
+    };
+  }, []);
+
+  const knownDuration =
+    status.duration && status.duration > 0
+      ? status.duration
+      : durationMs
+        ? durationMs / 1000
+        : 0;
+  const progress = knownDuration > 0 ? Math.min(status.currentTime / knownDuration, 1) : 0;
+  const shownTime = status.currentTime > 0 ? status.currentTime : knownDuration;
+
+  const togglePlay = () => {
+    if (status.playing) {
+      player.pause();
+      if (activePlayback?.key === boxKey.current) activePlayback = null;
+      return;
+    }
+    // Natural end of track: rewind so replay starts from the beginning.
+    if (status.didJustFinish) {
+      player.seekTo(0);
+    }
+    if (activePlayback && activePlayback.key !== boxKey.current) {
+      activePlayback.pause();
+    }
+    activePlayback = { key: boxKey.current, pause: () => player.pause() };
+    void player.play();
+  };
+
+  const seekToFraction = (locationX: number) => {
+    if (!status.isLoaded || trackWidth <= 0 || knownDuration <= 0) return;
+    const frac = Math.max(0, Math.min(locationX / trackWidth, 1));
+    void player.seekTo(frac * knownDuration);
+    if (!status.playing) {
+      if (activePlayback && activePlayback.key !== boxKey.current) {
+        activePlayback.pause();
+      }
+      activePlayback = { key: boxKey.current, pause: () => player.pause() };
+      void player.play();
+    }
+  };
+
+  return (
+    <View style={styles.audioRow}>
+      <Pressable
+        hitSlop={6}
+        onPress={togglePlay}
+        style={[styles.playBtn, { backgroundColor: colors.brand }]}
+      >
+        <Ionicons
+          name={status.playing ? 'pause' : 'play'}
+          size={16}
+          color="#FFFFFF"
+          style={status.playing ? undefined : styles.playIcon}
+        />
+      </Pressable>
+      <Pressable style={styles.audioBar} onPress={(e) => seekToFraction(e.nativeEvent.locationX)}>
+        <View
+          style={[styles.audioTrack, { backgroundColor: colors.divider }]}
+          onLayout={(e) => setTrackWidth(e.nativeEvent.layout.width)}
+        >
+          <View style={[styles.audioFill, { backgroundColor: colors.brand, width: `${progress * 100}%` }]} />
+        </View>
+      </Pressable>
+      <Text style={[styles.audioDuration, { color: colors.textSecondary }]}>
+        {formatPlayDuration(shownTime)}
+      </Text>
+    </View>
+  );
+}
 
 const REPLY_SWIPE_THRESHOLD = 56;
 const REPLY_SWIPE_MAX_SHIFT = 64;
@@ -95,14 +194,23 @@ function AttachmentMedia({ attachment, isOwn }: { attachment: AttachmentDTO; isO
     return <Image source={{ uri: url }} style={styles.mediaImage} contentFit="cover" transition={100} />;
   }
 
+  if (attachment.type === 'audio') {
+    if (!url) {
+      return (
+        <View style={[styles.audioLoading, { backgroundColor: colors.background }]}>
+          <ActivityIndicator size="small" color={colors.brand} />
+        </View>
+      );
+    }
+    return <AudioPlayerBox key={url} uri={url} durationMs={attachment.durationMs} />;
+  }
+
   const name =
     attachment.type === 'video'
       ? 'videocam'
-      : attachment.type === 'audio'
-        ? 'mic'
-        : attachment.type === 'file'
-          ? 'document-attach'
-          : 'document';
+      : attachment.type === 'file'
+        ? 'document-attach'
+        : 'document';
   return (
     <View style={[styles.fileBox, { backgroundColor: colors.background }]}>
       <Ionicons name={name} size={26} color={colors.brand} />
@@ -222,7 +330,7 @@ export function MessageBubble({
           key={a.id}
           onPress={() => {
             if (onPress) onPress(message);
-            else if (onOpenMedia) onOpenMedia(a);
+            else if (onOpenMedia && a.type !== 'audio' && a.type !== 'file') onOpenMedia(a);
           }}
           onLongPress={onLongPress ? () => onLongPress(message) : undefined}
           delayLongPress={250}
@@ -469,6 +577,49 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     marginBottom: 4,
     maxWidth: 220,
+  },
+  audioLoading: {
+    width: 200,
+    height: 44,
+    marginBottom: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 8,
+  },
+  audioRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    width: 200,
+    marginBottom: 4,
+  },
+  playBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  playIcon: {
+    marginLeft: 1,
+  },
+  audioBar: {
+    flex: 1,
+    justifyContent: 'center',
+  },
+  audioTrack: {
+    height: 4,
+    borderRadius: 2,
+    overflow: 'hidden',
+  },
+  audioFill: {
+    height: 4,
+    borderRadius: 2,
+  },
+  audioDuration: {
+    fontSize: 11,
+    minWidth: 32,
+    textAlign: 'right',
   },
   fileName: {
     flex: 1,
