@@ -12,12 +12,17 @@ export async function loadAuth(): Promise<{ token: string | null; user: UserDTO 
   let user: UserDTO | null = null;
   if (userRaw) {
     try {
-      user = JSON.parse(userRaw) as UserDTO;
+      const parsed = JSON.parse(userRaw) as Partial<UserDTO> & { name?: string };
+      // Sessions persisted before the users rework stored `name`/`email`/`phone`
+      // and no `fullName`. Those accounts predate password auth, so drop the
+      // stale session and make the user sign in again.
+      user = typeof parsed.fullName === 'string' ? (parsed as UserDTO) : null;
+      if (!user) await clearAuth();
     } catch {
       user = null;
     }
   }
-  return { token, user };
+  return { token: user ? token : null, user };
 }
 
 export async function saveAuth(token: string, user: UserDTO): Promise<void> {

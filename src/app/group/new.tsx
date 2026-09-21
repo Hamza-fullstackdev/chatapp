@@ -138,10 +138,10 @@ export default function NewGroupScreen() {
                   { backgroundColor: pressed ? colors.divider : colors.background },
                 ]}
               >
-                <Avatar name={item.name} uri={item.avatarUrl} size={44} />
+                <Avatar name={item.fullName} uri={item.avatarUrl} size={44} />
                 <View style={styles.info}>
                   <Text style={[styles.name, { color: colors.text }]} numberOfLines={1}>
-                    {item.name}
+                    {item.fullName}
                   </Text>
                   <Text style={[styles.username, { color: colors.textSecondary }]} numberOfLines={1}>
                     @{item.username}

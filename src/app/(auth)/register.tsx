@@ -11,10 +11,9 @@ import { pickAvatarImage, uploadAvatar, type LocalUploadSource } from '@/lib/med
 
 export default function RegisterScreen() {
   const { colors, dark } = useWaTheme();
-  const [name, setName] = useState('');
+  const [fullName, setFullName] = useState('');
   const [username, setUsername] = useState('');
-  const [email, setEmail] = useState('');
-  const [code, setCode] = useState('1234');
+  const [password, setPassword] = useState('');
   const [avatarDraft, setAvatarDraft] = useState<LocalUploadSource | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -25,17 +24,26 @@ export default function RegisterScreen() {
 
   const submit = async () => {
     if (busy) return;
-    if (!name.trim() || !/^[a-z0-9_.-]{3,32}$/i.test(username.trim())) {
-      Alert.alert('Invalid details', 'Enter your name and a username (3-32 chars, a-z 0-9 _ . -).');
+    const cleanName = fullName.trim();
+    const cleanUsername = username.trim();
+    if (!cleanName) {
+      Alert.alert('Invalid details', 'Enter your full name.');
+      return;
+    }
+    if (!/^[a-z0-9_.-]{3,32}$/i.test(cleanUsername)) {
+      Alert.alert('Invalid username', 'Username must be 3-32 characters (a-z 0-9 _ . -) with no spaces.');
+      return;
+    }
+    if (password.length < 6) {
+      Alert.alert('Invalid password', 'Password must be at least 6 characters.');
       return;
     }
     setBusy(true);
     try {
       const result = await authApi.register({
-        name: name.trim(),
-        username: username.trim(),
-        code: code.trim() || '1234',
-        email: email.trim() || undefined,
+        fullName: cleanName,
+        username: cleanUsername,
+        password,
       });
       // The upload needs an authenticated token; the account now exists so we
       // can push the photo to the avatars bucket and patch the profile. This
@@ -72,7 +80,7 @@ export default function RegisterScreen() {
               <Image source={require('@/assets/images/launcher.png')} style={styles.logo} contentFit="cover" />
             </View>
             <Text style={styles.title}>Create your profile</Text>
-            <Text style={styles.subtitle}>You will use your username + code to sign in.</Text>
+            <Text style={styles.subtitle}>You will use your username + password to sign in.</Text>
             <Pressable onPress={pickAvatar} style={styles.avatarPicker} hitSlop={10}>
               {avatarDraft ? (
                 <Image source={{ uri: avatarDraft.uri }} style={styles.avatarPick} contentFit="cover" />
@@ -92,8 +100,8 @@ export default function RegisterScreen() {
             <View style={[styles.field, { backgroundColor: dark ? colors.incomingBubble : colors.backgroundSecondary }]}>
               <Ionicons name="person-outline" size={20} color={colors.textSecondary} style={styles.fieldIcon} />
               <TextInput
-                value={name}
-                onChangeText={setName}
+                value={fullName}
+                onChangeText={setFullName}
                 placeholder="Full name"
                 placeholderTextColor={colors.textSecondary}
                 style={[styles.input, { color: colors.text }]}
@@ -114,28 +122,14 @@ export default function RegisterScreen() {
             </View>
 
             <View style={[styles.field, { backgroundColor: dark ? colors.incomingBubble : colors.backgroundSecondary }]}>
-              <Ionicons name="mail-outline" size={20} color={colors.textSecondary} style={styles.fieldIcon} />
+              <Ionicons name="lock-closed-outline" size={20} color={colors.textSecondary} style={styles.fieldIcon} />
               <TextInput
-                value={email}
-                onChangeText={setEmail}
-                placeholder="Email (optional)"
+                value={password}
+                onChangeText={setPassword}
+                placeholder="Password"
                 placeholderTextColor={colors.textSecondary}
-                autoCapitalize="none"
-                autoCorrect={false}
-                keyboardType="email-address"
-                style={[styles.input, { color: colors.text }]}
-              />
-            </View>
-
-            <View style={[styles.field, { backgroundColor: dark ? colors.incomingBubble : colors.backgroundSecondary }]}>
-              <Ionicons name="keypad-outline" size={20} color={colors.textSecondary} style={styles.fieldIcon} />
-              <TextInput
-                value={code}
-                onChangeText={setCode}
-                placeholder="Verification code"
-                placeholderTextColor={colors.textSecondary}
-                keyboardType="number-pad"
                 secureTextEntry
+                autoCapitalize="none"
                 style={[styles.input, { color: colors.text }]}
               />
             </View>
@@ -153,7 +147,7 @@ export default function RegisterScreen() {
             </Pressable>
 
             <Text style={[styles.hint, { color: colors.textSecondary }]}>
-              Dev hint: the default code is 1234 (SMS delivery comes later).
+              Usernames cannot contain spaces and must be 3-32 characters.
             </Text>
           </View>
         </ScrollView>

@@ -12,10 +12,28 @@ import {
   createCallPeerConnection,
   handleIncomingSignal,
   sendOffer,
+  setLocalTracksEnabled,
   type OutboundSignal,
 } from '@/lib/webrtc';
 import { Avatar } from '@/components/avatar';
 import type { CallDTO, PresenceUpdateEvent } from '@/types/api';
+
+interface SignalEvent {
+  from: string;
+  callId: string;
+  type: 'offer' | 'answer' | 'ice' | 'request-offer';
+  data: unknown;
+}
+
+function formatElapsed(totalSeconds: number): string {
+  const m = Math.floor(totalSeconds / 60)
+    .toString()
+    .padStart(2, '0');
+  const s = Math.floor(totalSeconds % 60)
+    .toString()
+    .padStart(2, '0');
+  return `${m}:${s}`;
+}
 
 export default function CallScreen() {
   const params = useLocalSearchParams<{ id: string; type?: string }>();
@@ -25,14 +43,22 @@ export default function CallScreen() {
   const [call, setCall] = useState<CallDTO | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
-  const [connectedText, setConnectedText] = useState('Connecting…');
+  const [mediaLive, setMediaLive] = useState(false);
   const [peerOnline, setPeerOnline] = useState(false);
+
+  const [muted, setMuted] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  // True once a callee answers from this screen (covers the push-tap entry
+  // where no in-app incoming banner was ever shown).
+  const [incomingAccepted, setIncomingAccepted] = useState(false);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const answerReceived = useRef(false);
   const offerTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const endedRef = useRef(false);
+  const initPeerPromiseRef = useRef<Promise<void> | null>(null);
+  const pendingSignalsRef = useRef<SignalEvent[]>([]);
 
   const outgoing = call?.isOutgoing ?? false;
   const peerId = call?.peerId ?? '';
@@ -44,23 +70,6 @@ export default function CallScreen() {
     [peerId, callId],
   );
 
-  const initPeer = useCallback(async () => {
-    if (pcRef.current) return;
-    const { pc, localStream: ls } = await createCallPeerConnection(callType === 'video', onSignal, (stream) =>
-      setRemoteStream(stream),
-    );
-    pcRef.current = pc;
-    localStreamRef.current = ls;
-    if (ls) setLocalStream(ls);
-
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'connected') setConnectedText('Connected');
-      else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-        setConnectedText('Reconnecting…');
-      }
-    };
-  }, [callType, onSignal]);
-
   const stopOfferLoop = useCallback(() => {
     if (offerTimer.current) {
       clearInterval(offerTimer.current);
@@ -68,17 +77,87 @@ export default function CallScreen() {
     }
   }, []);
 
+  // Apply a relayed WebRTC packet. Anything that must be answered flows back
+  // through `onSignal`. Expectation: this runs only with an active peer
+  // connection — signals that arrive earlier are buffered and flushed on init.
+  const processSignal = useCallback(
+    (event: SignalEvent) => {
+      const pc = pcRef.current;
+      if (!pc || endedRef.current) return;
+      void (async () => {
+        try {
+          const out = await handleIncomingSignal(pc, { type: event.type, data: event.data });
+          if (event.type === 'answer') {
+            answerReceived.current = true;
+            stopOfferLoop();
+          }
+          if (out) onSignal(out);
+        } catch {
+          // A relayed signal raced with teardown — safe to ignore.
+        }
+      })();
+    },
+    [onSignal, stopOfferLoop],
+  );
+
+  const flushPendingSignals = useCallback(() => {
+    if (pendingSignalsRef.current.length === 0) return;
+    const queued = pendingSignalsRef.current.splice(0, pendingSignalsRef.current.length);
+    for (const event of queued) processSignal(event);
+  }, [processSignal]);
+
+  // Create the peer connection and capture the local stream (mic/camera).
+  // Serialised through a promise ref so a re-render can never spawn two PCs.
+  const initPeer = useCallback(async () => {
+    if (pcRef.current) return;
+    if (initPeerPromiseRef.current) return initPeerPromiseRef.current;
+    const pending = (async () => {
+      try {
+        const { pc, localStream: ls } = await createCallPeerConnection(
+          callType === 'video',
+          onSignal,
+          (stream) => {
+            setRemoteStream(stream);
+            setMediaLive(true);
+          },
+        );
+        if (endedRef.current) {
+          closePeer(pc, ls);
+          return;
+        }
+        pcRef.current = pc;
+        localStreamRef.current = ls;
+        if (ls) setLocalStream(ls);
+
+        pc.onconnectionstatechange = () => {
+          if (pc.connectionState === 'connected') setMediaLive(true);
+        };
+
+        // Any signals that raced the peer connection mount are replayed now.
+        flushPendingSignals();
+      } finally {
+        initPeerPromiseRef.current = null;
+      }
+    })();
+    initPeerPromiseRef.current = pending;
+    return pending;
+  }, [callType, onSignal, flushPendingSignals]);
+
   // Load the call row once.
   useEffect(() => {
     let active = true;
     void callsApi
       .get(callId)
       .then(({ call: row }) => {
-        if (active) {
-          setCall(row);
-          setPeerOnline(row.online);
-          setConnectedText(row.status === 'ongoing' ? 'Connected' : 'Ringing…');
+        if (!active) return;
+        if (row.status !== 'ringing' && row.status !== 'ongoing') {
+          Alert.alert('Call ended', 'This call is no longer active', [
+            { text: 'OK', onPress: () => router.back() },
+          ]);
+          return;
         }
+        setCall(row);
+        setPeerOnline(row.online);
       })
       .catch(() => {
         if (active) {
@@ -92,63 +171,78 @@ export default function CallScreen() {
     };
   }, [callId]);
 
-  // Establish the peer connection for the caller side and drive the offer loop.
+  // Establish the peer connection and drive the offer/answer handshake.
+  // Caller: re-announce the offer until the callee answers.
+  // Callee: nudge the caller for an offer until media connects.
   useEffect(() => {
     if (!call) return;
     const timer = setTimeout(() => {
       void initPeer();
-      if (!call.isOutgoing) return;
-      const attemptOffer = () => {
-        if (pcRef.current) void sendOffer(pcRef.current, onSignal).catch(() => undefined);
-      };
-      attemptOffer();
-      offerTimer.current = setInterval(() => {
-        if (answerReceived.current || endedRef.current) {
-          stopOfferLoop();
-          return;
-        }
+      if (call.isOutgoing) {
+        const attemptOffer = () => {
+          if (pcRef.current) void sendOffer(pcRef.current, onSignal).catch(() => undefined);
+        };
         attemptOffer();
-      }, 2500);
+        offerTimer.current = setInterval(() => {
+          if (answerReceived.current || endedRef.current) {
+            stopOfferLoop();
+            return;
+          }
+          attemptOffer();
+        }, 2500);
+      } else if ((call.status === 'ongoing' || incomingAccepted) && peerId) {
+        const requestOffer = () => {
+          if (endedRef.current || answerReceived.current) return;
+          if (pcRef.current) sendCallSignal(peerId, callId, 'request-offer', {});
+        };
+        void initPeer().then(requestOffer);
+        offerTimer.current = setInterval(() => {
+          if (pcRef.current?.connectionState === 'connected' || endedRef.current) {
+            stopOfferLoop();
+            return;
+          }
+          requestOffer();
+        }, 2500);
+      }
     }, 0);
     return () => {
       clearTimeout(timer);
       stopOfferLoop();
     };
-  }, [call, initPeer, onSignal, stopOfferLoop]);
+  }, [call, peerId, callId, incomingAccepted, initPeer, onSignal, stopOfferLoop]);
 
-  // WebRTC signaling relay from the socket.
-  useSocketEvent<{
-    from: string;
-    callId: string;
-    type: 'offer' | 'answer' | 'ice';
-    data: unknown;
-  }>('call:signal', (event) => {
-    if (event.callId !== callId || !pcRef.current) return;
-    if (endedRef.current) return;
-    void (async () => {
-      const out = await handleIncomingSignal(pcRef.current!, {
-        type: event.type,
-        data: event.data,
-      });
-      if (event.type === 'answer') {
-        answerReceived.current = true;
-        stopOfferLoop();
-        setConnectedText('Connected');
-      }
-      if (out) onSignal(out);
-    })();
+  // Relay WebRTC signaling. Signals arriving before the peer connection is
+  // ready are buffered instead of dropped, so an offer that races the screen
+  // mount is never lost.
+  useSocketEvent<SignalEvent>('call:signal', (event) => {
+    if (event.callId !== callId || endedRef.current) return;
+    if (!pcRef.current) {
+      pendingSignalsRef.current.push(event);
+      return;
+    }
+    processSignal(event);
   });
+
+  // Call duration clock while the media session is live.
+  useEffect(() => {
+    if (!mediaLive) return;
+    const start = call?.answeredAt ? new Date(call.answeredAt).getTime() : Date.now();
+    const tick = () => setElapsed(Math.max(0, Math.floor((Date.now() - start) / 1000)));
+    tick();
+    const timer = setInterval(tick, 1000);
+    return () => clearInterval(timer);
+  }, [mediaLive, call?.answeredAt]);
 
   // Peer lifecycle events for this call.
   const endLocal = useCallback(
-    (byPeer: boolean) => {
+    (message?: string) => {
       if (endedRef.current) return;
       endedRef.current = true;
       stopOfferLoop();
       closePeer(pcRef.current, localStreamRef.current);
       pcRef.current = null;
       localStreamRef.current = null;
-      if (byPeer) Alert.alert('Call ended', 'The call was ended by the other side');
+      if (message) Alert.alert('Call ended', message);
       router.back();
     },
     [stopOfferLoop],
@@ -156,7 +250,8 @@ export default function CallScreen() {
 
   useSocketEvent<{ call: CallDTO }>('call:ongoing', (event) => {
     if (event.call.id !== callId) return;
-    setConnectedText('Connected');
+    // Persist the server-accepted state (answeredAt drives the timer).
+    setCall(event.call);
   });
   useSocketEvent<PresenceUpdateEvent>('presence:update', (event) => {
     if (event.userId === peerId) setPeerOnline(event.online);
@@ -164,19 +259,19 @@ export default function CallScreen() {
 
   useSocketEvent<{ call: CallDTO }>('call:ended', (event) => {
     if (event.call.id !== callId) return;
-    endLocal(true);
+    endLocal('The call ended');
   });
   useSocketEvent<{ call: CallDTO }>('call:missed', (event) => {
     if (event.call.id !== callId) return;
-    endLocal(true);
+    endLocal('No answer');
   });
   useSocketEvent<{ call: CallDTO }>('call:cancelled', (event) => {
     if (event.call.id !== callId) return;
-    endLocal(true);
+    endLocal('The call was cancelled');
   });
   useSocketEvent<{ call: CallDTO }>('call:rejected', (event) => {
     if (event.call.id !== callId) return;
-    endLocal(true);
+    endLocal('The call was declined');
   });
 
   const hangup = () => {
@@ -191,19 +286,43 @@ export default function CallScreen() {
     router.back();
   };
 
-  const muted = false; // toggle not implemented; keep simple
+  const toggleMute = () => {
+    const next = !muted;
+    setLocalTracksEnabled(localStreamRef.current, 'audio', !next);
+    setMuted(next);
+  };
+
+  // Incoming call answered from this screen (push-tap entry): flip the server
+  // state, then the effect above spins up media + the offer handshake.
+  const acceptCall = () => {
+    if (incomingAccepted) return;
+    setIncomingAccepted(true);
+    void callsApi.updateStatus(callId, 'accepted').catch(() => undefined);
+  };
+
+  const rejectCall = () => {
+    if (endedRef.current) return;
+    endedRef.current = true;
+    void callsApi.updateStatus(callId, 'rejected').catch(() => undefined);
+    router.back();
+  };
+
   const isVideo = callType === 'video';
   const showPeer = !!remoteStream;
   const peerName = call?.peerName ?? 'Contact';
+  const ringingIncoming = !outgoing && call?.status === 'ringing' && !incomingAccepted;
 
-  const statusLine =
-    call?.status === 'ongoing' || connectedText === 'Connected'
-      ? connectedText
+  const statusLine = ringingIncoming
+    ? 'Ringing…'
+    : mediaLive
+      ? `Connected · ${formatElapsed(elapsed)}`
       : outgoing
         ? peerOnline
           ? 'Ringing…'
           : 'Calling…'
-        : 'Ringing…';
+        : call?.status === 'ongoing'
+          ? 'Connecting…'
+          : 'Ringing…';
 
   return (
     <SafeAreaView edges={['top', 'bottom']} style={[styles.safe, { backgroundColor: '#0B141A' }]}>
@@ -232,19 +351,28 @@ export default function CallScreen() {
         />
       )}
 
-      <View style={styles.controls}>
-        {isVideo && <Pressable style={styles.controlBtn} onPress={() => undefined}>
-          <Ionicons name={muted ? 'mic-off' : 'mic'} size={24} color="#FFFFFF" />
-        </Pressable>}
-        <Pressable style={[styles.controlBtn, styles.endBtn]} onPress={hangup}>
-          <Ionicons name="call" size={30} color="#FFFFFF" style={{ transform: [{ rotate: '135deg' }] }} />
-        </Pressable>
-        {!isVideo && (
+      {ringingIncoming ? (
+        <View style={styles.controls}>
+          <Pressable style={[styles.controlBtn, styles.declineBtn]} onPress={rejectCall}>
+            <Ionicons name="call" size={26} color="#FFFFFF" style={{ transform: [{ rotate: '135deg' }] }} />
+          </Pressable>
+          <Pressable style={[styles.controlBtn, styles.acceptBtn]} onPress={acceptCall}>
+            <Ionicons name="call" size={26} color="#FFFFFF" />
+          </Pressable>
+        </View>
+      ) : (
+        <View style={styles.controls}>
+          <Pressable style={styles.controlBtn} onPress={toggleMute}>
+            <Ionicons name={muted ? 'mic-off' : 'mic'} size={24} color="#FFFFFF" />
+          </Pressable>
+          <Pressable style={[styles.controlBtn, styles.endBtn]} onPress={hangup}>
+            <Ionicons name="call" size={30} color="#FFFFFF" style={{ transform: [{ rotate: '135deg' }] }} />
+          </Pressable>
           <Pressable style={styles.controlBtn} onPress={() => undefined}>
             <Ionicons name="volume-high" size={24} color="#FFFFFF" />
           </Pressable>
-        )}
-      </View>
+        </View>
+      )}
     </SafeAreaView>
   );
 }
@@ -287,6 +415,18 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   endBtn: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: '#E5423D',
+  },
+  acceptBtn: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: '#25D366',
+  },
+  declineBtn: {
     width: 64,
     height: 64,
     borderRadius: 32,

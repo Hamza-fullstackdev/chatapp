@@ -149,7 +149,7 @@ export async function refreshConversations(conversations: import('@/types/api').
     await upsertConversation(db, c);
     if (c.otherUserId && c.otherUserName) {
       await touchUserProfile(db, c.otherUserId, {
-        name: c.otherUserName,
+        fullName: c.otherUserName,
         avatarUrl: c.otherUserAvatarUrl,
       });
     }
@@ -185,7 +185,7 @@ export async function cacheDetail(detail: import('@/types/api').ConversationDeta
   for (const member of detail.members) {
     await upsertUserProfile(db, {
       id: member.id,
-      name: member.name,
+      fullName: member.name,
       username: member.username,
       avatarUrl: member.avatarUrl,
       lastSeenAt: null,

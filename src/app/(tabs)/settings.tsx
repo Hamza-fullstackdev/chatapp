@@ -22,13 +22,19 @@ export default function SettingsScreen() {
   const { user, signOut, updateUser } = useAuth();
   const { colors } = useWaTheme();
   const [editing, setEditing] = useState(false);
-  const [name, setName] = useState('');
+  const [fullName, setFullName] = useState('');
+  const [username, setUsername] = useState('');
   const [bio, setBio] = useState('');
   const [avatarDraft, setAvatarDraft] = useState<LocalUploadSource | null>(null);
   const [saving, setSaving] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleteText, setDeleteText] = useState('');
   const [deleting, setDeleting] = useState(false);
+  const [changingPassword, setChangingPassword] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [savingPassword, setSavingPassword] = useState(false);
 
   const [mediaStats, setMediaStats] = useState<{ entries: number; bytes: number }>({ entries: 0, bytes: 0 });
 
@@ -62,7 +68,8 @@ export default function SettingsScreen() {
   if (!user) return null;
 
   const openEditor = () => {
-    setName(user.name);
+    setFullName(user.fullName);
+    setUsername(user.username);
     setBio(user.bio ?? '');
     setAvatarDraft(null);
     setEditing(true);
@@ -74,7 +81,17 @@ export default function SettingsScreen() {
   };
 
   const saveProfile = async () => {
-    if (!name.trim() || saving) return;
+    if (saving) return;
+    const cleanName = fullName.trim();
+    const cleanUsername = username.trim();
+    if (!cleanName) {
+      Alert.alert('Invalid name', 'Enter your full name.');
+      return;
+    }
+    if (!/^[a-z0-9_.-]{3,32}$/i.test(cleanUsername)) {
+      Alert.alert('Invalid username', 'Username must be 3-32 characters (a-z 0-9 _ . -) with no spaces.');
+      return;
+    }
     setSaving(true);
     try {
       let avatarUrl: string | undefined;
@@ -82,7 +99,8 @@ export default function SettingsScreen() {
         avatarUrl = await uploadAvatar(avatarDraft);
       }
       const updated = await authApi.updateMe({
-        name: name.trim(),
+        fullName: cleanName,
+        username: cleanUsername,
         bio: bio.trim() || null,
         avatarUrl,
       });
@@ -92,6 +110,39 @@ export default function SettingsScreen() {
       Alert.alert('Save failed', e instanceof Error ? e.message : 'Could not save your profile');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const openPasswordModal = () => {
+    setCurrentPassword('');
+    setNewPassword('');
+    setConfirmPassword('');
+    setChangingPassword(true);
+  };
+
+  const savePassword = async () => {
+    if (savingPassword) return;
+    if (!currentPassword) {
+      Alert.alert('Missing details', 'Enter your current password.');
+      return;
+    }
+    if (newPassword.length < 6) {
+      Alert.alert('Invalid password', 'New password must be at least 6 characters.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      Alert.alert('Passwords do not match', 'Re-enter the new password to confirm.');
+      return;
+    }
+    setSavingPassword(true);
+    try {
+      await authApi.changePassword(currentPassword, newPassword);
+      setChangingPassword(false);
+      Alert.alert('Password updated', 'Use your new password next time you sign in.');
+    } catch (e) {
+      Alert.alert('Could not change password', e instanceof Error ? e.message : 'Try again');
+    } finally {
+      setSavingPassword(false);
     }
   };
 
@@ -120,8 +171,8 @@ export default function SettingsScreen() {
     <View style={[styles.safe, { backgroundColor: colors.background }]}>
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
       <View style={[styles.profile, { backgroundColor: colors.brandDark }]}>
-        <Avatar name={user.name} uri={user.avatarUrl} size={84} />
-        <Text style={styles.name}>{user.name}</Text>
+        <Avatar name={user.fullName} uri={user.avatarUrl} size={84} />
+        <Text style={styles.name}>{user.fullName}</Text>
         <Text style={styles.username}>@{user.username}</Text>
         <Text style={styles.status}>{user.bio ?? 'Hey there! I am using chat-app.'}</Text>
         <Text style={styles.subStatus}>{formatLastSeen(user.lastSeenAt)}</Text>
@@ -136,20 +187,17 @@ export default function SettingsScreen() {
       </Pressable>
 
       <View style={styles.section}>
-        <View style={[styles.item, { backgroundColor: colors.backgroundSecondary }]}>
-          <Ionicons name="mail-outline" size={20} color={colors.textSecondary} />
-          <Text style={[styles.itemLabel, { color: colors.text }]}>Email</Text>
-          <Text style={[styles.itemValue, { color: colors.textSecondary }]} numberOfLines={1}>
-            {user.email ?? 'Not set'}
+        <Pressable
+          onPress={openPasswordModal}
+          style={({ pressed }) => [styles.item, { backgroundColor: pressed ? colors.divider : colors.backgroundSecondary }]}
+        >
+          <Ionicons name="lock-closed-outline" size={20} color={colors.textSecondary} />
+          <Text style={[styles.itemLabel, { color: colors.text }]}>Password</Text>
+          <Text style={[styles.itemValue, { color: colors.brand }]} numberOfLines={1}>
+            Change password
           </Text>
-        </View>
-        <View style={[styles.item, { backgroundColor: colors.backgroundSecondary }]}>
-          <Ionicons name="call-outline" size={20} color={colors.textSecondary} />
-          <Text style={[styles.itemLabel, { color: colors.text }]}>Phone</Text>
-          <Text style={[styles.itemValue, { color: colors.textSecondary }]} numberOfLines={1}>
-            {user.phone ?? 'Not set'}
-          </Text>
-        </View>
+          <Ionicons name="chevron-forward" size={18} color={colors.textSecondary} />
+        </Pressable>
       </View>
 
       <Pressable
@@ -216,16 +264,25 @@ export default function SettingsScreen() {
           <View style={[styles.modalCard, { backgroundColor: colors.backgroundSecondary }]}>
             <Text style={[styles.modalTitle, { color: colors.text }]}>Edit profile</Text>
             <Pressable onPress={pickAvatar} style={styles.avatarPicker}>
-              <Avatar name={user.name} uri={avatarDraft?.uri ?? user.avatarUrl} size={84} />
+              <Avatar name={user.fullName} uri={avatarDraft?.uri ?? user.avatarUrl} size={84} />
               <View style={[styles.avatarBadge, { backgroundColor: colors.brand }]}>
                 <Ionicons name="camera" size={16} color="#FFFFFF" />
               </View>
             </Pressable>
             <TextInput
-              value={name}
-              onChangeText={setName}
-              placeholder="Name"
+              value={fullName}
+              onChangeText={setFullName}
+              placeholder="Full name"
               placeholderTextColor={colors.textSecondary}
+              style={[styles.modalInput, { color: colors.text, backgroundColor: colors.divider }]}
+            />
+            <TextInput
+              value={username}
+              onChangeText={setUsername}
+              placeholder="Username"
+              placeholderTextColor={colors.textSecondary}
+              autoCapitalize="none"
+              autoCorrect={false}
               style={[styles.modalInput, { color: colors.text, backgroundColor: colors.divider }]}
             />
             <TextInput
@@ -253,6 +310,74 @@ export default function SettingsScreen() {
                 ]}
               >
                 <Text style={styles.saveText}>{saving ? 'Saving…' : 'Save'}</Text>
+              </Pressable>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      <Modal
+        visible={changingPassword}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          if (!savingPassword) setChangingPassword(false);
+        }}
+      >
+        <KeyboardAvoidingView
+          style={styles.modalOverlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+          <View style={[styles.modalCard, { backgroundColor: colors.backgroundSecondary }]}>
+            <Text style={[styles.modalTitle, { color: colors.text }]}>Change password</Text>
+            <TextInput
+              value={currentPassword}
+              onChangeText={setCurrentPassword}
+              placeholder="Current password"
+              placeholderTextColor={colors.textSecondary}
+              secureTextEntry
+              autoCapitalize="none"
+              editable={!savingPassword}
+              style={[styles.modalInput, { color: colors.text, backgroundColor: colors.divider }]}
+            />
+            <TextInput
+              value={newPassword}
+              onChangeText={setNewPassword}
+              placeholder="New password"
+              placeholderTextColor={colors.textSecondary}
+              secureTextEntry
+              autoCapitalize="none"
+              editable={!savingPassword}
+              style={[styles.modalInput, { color: colors.text, backgroundColor: colors.divider }]}
+            />
+            <TextInput
+              value={confirmPassword}
+              onChangeText={setConfirmPassword}
+              placeholder="Confirm new password"
+              placeholderTextColor={colors.textSecondary}
+              secureTextEntry
+              autoCapitalize="none"
+              editable={!savingPassword}
+              style={[styles.modalInput, { color: colors.text, backgroundColor: colors.divider }]}
+            />
+            <View style={styles.modalActions}>
+              <Pressable
+                onPress={() => setChangingPassword(false)}
+                disabled={savingPassword}
+                style={({ pressed }) => [styles.modalBtn, { backgroundColor: pressed ? colors.divider : colors.incomingBubble }]}
+              >
+                <Text style={{ color: colors.text }}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                onPress={savePassword}
+                disabled={savingPassword}
+                style={({ pressed }) => [
+                  styles.modalBtn,
+                  { backgroundColor: pressed ? '#00806b' : colors.brand },
+                  savingPassword && styles.buttonBusy,
+                ]}
+              >
+                <Text style={styles.saveText}>{savingPassword ? 'Saving…' : 'Save'}</Text>
               </Pressable>
             </View>
           </View>

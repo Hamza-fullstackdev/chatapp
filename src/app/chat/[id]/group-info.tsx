@@ -269,10 +269,10 @@ export default function GroupInfoScreen() {
                 onPress={() => void addMembers([item.id]).then(() => setAddOpen(false))}
                 style={({ pressed }) => [styles.memberRow, pressed && { opacity: 0.6 }]}
               >
-                <Avatar name={item.name} uri={item.avatarUrl} size={44} />
+                <Avatar name={item.fullName} uri={item.avatarUrl} size={44} />
                 <View style={styles.memberInfo}>
                   <Text style={[styles.memberName, { color: colors.text }]} numberOfLines={1}>
-                    {item.name}
+                    {item.fullName}
                   </Text>
                   <Text style={[styles.username, { color: colors.textSecondary }]}>@{item.username}</Text>
                 </View>

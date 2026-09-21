@@ -49,10 +49,8 @@ export default function UserProfileScreen() {
         setLoading(false);
         await upsertUserProfile(db, {
           id: loaded.id,
-          name: loaded.name,
+          fullName: loaded.fullName,
           username: loaded.username,
-          email: loaded.email,
-          phone: loaded.phone,
           bio: loaded.bio,
           avatarUrl: loaded.avatarUrl,
           lastSeenAt: loaded.lastSeenAt,
@@ -81,7 +79,7 @@ export default function UserProfileScreen() {
     }
   };
 
-  const showName = profile?.name ?? '';
+  const showName = profile?.fullName ?? '';
   const online = false;
 
   return (
@@ -114,7 +112,7 @@ export default function UserProfileScreen() {
               <Ionicons name="expand-outline" size={16} color="#FFFFFF" />
             </View>
           </Pressable>
-          <Text style={[styles.name, { color: colors.text }]}>{profile.name}</Text>
+          <Text style={[styles.name, { color: colors.text }]}>{profile.fullName}</Text>
           <Text style={[styles.username, { color: colors.textSecondary }]}>@{profile.username}</Text>
           <Text style={[styles.presence, { color: colors.textSecondary }]}>
             {online ? 'online' : profile.lastSeenAt ? `last seen ${formatLastSeen(profile.lastSeenAt)}` : 'offline'}
@@ -138,24 +136,6 @@ export default function UserProfileScreen() {
           </Pressable>
 
           <View style={[styles.card, { backgroundColor: colors.backgroundSecondary }]}>
-            {profile.phone ? (
-              <View style={styles.row}>
-                <Ionicons name="call-outline" size={20} color={colors.textSecondary} />
-                <Text style={[styles.rowLabel, { color: colors.text }]}>Phone</Text>
-                <Text style={[styles.rowValue, { color: colors.textSecondary }]}>
-                  {profile.phone}
-                </Text>
-              </View>
-            ) : null}
-            {profile.email ? (
-              <View style={styles.row}>
-                <Ionicons name="mail-outline" size={20} color={colors.textSecondary} />
-                <Text style={[styles.rowLabel, { color: colors.text }]}>Email</Text>
-                <Text style={[styles.rowValue, { color: colors.textSecondary }]}>
-                  {profile.email}
-                </Text>
-              </View>
-            ) : null}
             <View style={styles.row}>
               <Ionicons name="information-circle-outline" size={20} color={colors.textSecondary} />
               <Text style={[styles.rowLabel, { color: colors.text }]}>About</Text>

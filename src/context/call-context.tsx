@@ -5,7 +5,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { useWaTheme } from '@/context/theme-context';
 import { useSocketEvent } from '@/context/socket-context';
 import { callsApi } from '@/lib/api';
-import { sendCallSignal } from '@/lib/socket';
 import { getDb } from '@/db/database';
 import { upsertCall } from '@/db/repositories';
 import { notifyLocalDb } from '@/lib/local-db-events';
@@ -84,8 +83,6 @@ export function CallProvider({ children }: { children: ReactNode }) {
       const { call } = await callsApi.create({ calleeId, callType, conversationId });
       persistCall(call);
       router.push({ pathname: '/call/[id]', params: { id: call.id, type: callType } });
-      // Give the call screen a beat to mount before the first offer.
-      setTimeout(() => sendCallSignal(calleeId, call.id, 'ice', { noop: true }), 50);
     },
     [persistCall, router],
   );

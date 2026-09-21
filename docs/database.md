@@ -27,11 +27,13 @@ Migrations live in `api/database/postgres/migrations/`:
 | `007_create_calls.sql` | `calls`, `call_participants` |
 | `008_create_devices.sql` | `devices`, `push_tokens` |
 | `009_create_sync_metadata.sql` | `sync_ops`, `sync_changelog` |
+| `010_add_calls_deleted_for.sql` | `calls` (per-user delete marker) |
+| `011_rework_users.sql` | `users` (drop email/phone/OTP, rename `name` → `full_name`) |
 
 ### Tables and key columns
 
-- **`users`** — `id uuid pk`, `name`, `username`, optional `email`/`phone`, `password_hash`,
-  `otp_hash` + `otp_expires_at`, `bio`, `avatar_url`, `last_seen_at`, timestamps.
+- **`users`** — `id uuid pk`, `full_name`, `username`, `password_hash`, `bio`, `avatar_url`,
+  `last_seen_at`, timestamps. There is no email, phone or OTP: login is username + password.
 - **`conversations`** — `type` (`private` | `group`), optional `name`/`avatar_url`, `created_by`,
   denormalized `last_message_id` + `last_message_at`.
 - **`conversation_members`** — pk `(conversation_id, user_id)`, `role` (`member` | `admin`),
@@ -72,7 +74,7 @@ All child rows cascade on delete; `messages.sender_id`, `conversations.created_b
 
 ### Indexes
 
-- `users`: unique lower-case username, unique lower-case email (partial), created-at.
+- `users`: unique lower-case username, created-at.
 - `conversations`: `created_by`, `last_message_at desc`.
 - `conversation_members`: `(user_id, conversation_id)`.
 - `messages`: `(conversation_id, created_at desc)`, `sender_id`, `reply_to`, and the unique

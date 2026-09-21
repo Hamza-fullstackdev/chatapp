@@ -48,11 +48,20 @@ export function sendMessageRead(conversationId: string, messageId: string): void
   socket?.emit('message:read', { conversationId, messageId });
 }
 
+/**
+ * Delivered ACK for an incoming message, fired once the message has been
+ * persisted to local SQLite. The server promotes it to 'delivered' and tells
+ * the sender, turning their single grey tick into a double grey tick.
+ */
+export function sendMessageReceived(conversationId: string, messageId: string): void {
+  socket?.emit('message:received', { conversationId, messageId });
+}
+
 /** Relay a WebRTC offer/answer/ICE packet to the target user (server forwards it). */
 export function sendCallSignal(
   to: string,
   callId: string,
-  type: 'offer' | 'answer' | 'ice',
+  type: 'offer' | 'answer' | 'ice' | 'request-offer',
   data: unknown,
 ): void {
   socket?.emit('call:signal', { to, callId, type, data });

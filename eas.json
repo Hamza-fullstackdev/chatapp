@@ -1,0 +1,36 @@
+{
+  "cli": {
+    "version": ">= 16.0.0",
+    "appVersionSource": "local"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://chatapp-api-el5x.onrender.com",
+        "EXPO_PUBLIC_SUPABASE_URL": "https://zzhoipcuartiftpztaun.supabase.co",
+        "EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY": "sb_publishable_gBIGCCw71hrcPovbHNVgTA__FPh8l7X"
+      }
+    },
+    "production": {
+      "android": {
+        "buildType": "app-bundle"
+      },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://chatapp-api-el5x.onrender.com",
+        "EXPO_PUBLIC_SUPABASE_URL": "https://zzhoipcuartiftpztaun.supabase.co",
+        "EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY": "sb_publishable_gBIGCCw71hrcPovbHNVgTA__FPh8l7X"
+      }
+    }
+  }
+}

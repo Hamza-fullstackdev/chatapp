@@ -111,10 +111,8 @@ const TABLE_DDL: string[] = [
   )`,
   `CREATE TABLE IF NOT EXISTS user_profiles (
     id TEXT PRIMARY KEY NOT NULL,
-    name TEXT,
+    full_name TEXT,
     username TEXT,
-    email TEXT,
-    phone TEXT,
     bio TEXT,
     avatar_url TEXT,
     last_seen_at TEXT,
@@ -160,7 +158,7 @@ const INDEX_DEFS: IndexDef[] = [
   { name: 'idx_media_cache_attachment', table: 'media_cache', columns: ['attachment_id'] },
   { name: 'idx_calls_created', table: 'calls', columns: ['created_at DESC'] },
   { name: 'idx_conv_members_conv', table: 'conversation_members', columns: ['conversation_id'] },
-  { name: 'idx_user_profiles_name', table: 'user_profiles', columns: ['name'] },
+  { name: 'idx_user_profiles_name', table: 'user_profiles', columns: ['full_name'] },
 ];
 
 const INDEX_DDL: string[] = INDEX_DEFS.map(
@@ -327,8 +325,6 @@ async function migrationV5(db: SQLite.SQLiteDatabase): Promise<void> {
   await repairSchema(db);
   for (const ddl of TABLE_DDL) await db.execAsync(ddl);
   await ensureColumns(db, 'user_profiles', [
-    ['email', 'TEXT'],
-    ['phone', 'TEXT'],
     ['bio', 'TEXT'],
   ]);
   await createIndexes(db);
@@ -373,6 +369,21 @@ async function migrationV8(db: SQLite.SQLiteDatabase): Promise<void> {
   ]);
 }
 
+/**
+ * Migration 9 — users are avatar / full name / username / bio only.
+ *
+ * The phone, email and OTP verification flow is gone, and the identity cache
+ * column `name` is now `full_name` (matching the API's `fullName`). The
+ * `user_profiles` table no longer matches its canonical shape, so it is
+ * dropped and recreated — it is a server-backed cache that repopulates on the
+ * next sync, never a source of truth.
+ */
+async function migrationV9(db: SQLite.SQLiteDatabase): Promise<void> {
+  await repairSchema(db);
+  for (const ddl of TABLE_DDL) await db.execAsync(ddl);
+  await createIndexes(db);
+}
+
 const MIGRATIONS: MigrationStep[] = [
   MIGRATION_V1,
   migrationV2,
@@ -382,6 +393,7 @@ const MIGRATIONS: MigrationStep[] = [
   migrationV6,
   migrationV7,
   migrationV8,
+  migrationV9,
 ];
 
 async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {

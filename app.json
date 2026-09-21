@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "app",
-    "slug": "app",
+    "name": "HAMI",
+    "slug": "hami",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/launcher.png",
@@ -13,7 +13,7 @@
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#00A884",
         "foregroundImage": "./assets/images/launcher.png"
       },
       "predictiveBackGestureEnabled": false,
@@ -25,9 +25,18 @@
         "android.permission.MODIFY_AUDIO_SETTINGS",
         "android.permission.SYSTEM_ALERT_WINDOW",
         "android.permission.WAKE_LOCK",
-        "android.permission.BLUETOOTH"
+        "android.permission.BLUETOOTH",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_MEDIA_VIDEO",
+        "android.permission.READ_MEDIA_AUDIO",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
       ],
-      "package": "com.hamidev.app"
+      "package": "com.hamidev.app",
+      "versionCode": 1
     },
     "web": {
       "output": "static",
@@ -38,9 +47,9 @@
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#208AEF",
+          "backgroundColor": "#00A884",
           "image": "./assets/images/spash-logo.png",
-          "imageWidth": 76
+          "imageWidth": 120
         }
       ],
       "expo-sqlite",
@@ -48,7 +57,7 @@
       [
         "expo-notifications",
         {
-          "color": "#208AEF",
+          "color": "#00A884",
           "defaultChannel": "default",
           "enableBackgroundRemoteNotifications": false
         }
@@ -77,11 +86,29 @@
           "microphonePermission": "Allow $(PRODUCT_NAME) to use your microphone for voice calls."
         }
       ],
-      "expo-audio"
+      "expo-audio",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "buildArchs": [
+              "arm64-v8a"
+            ],
+            "useLegacyPackaging": true
+          }
+        }
+      ],
+      "expo-video"
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "5dcc974a-f6b2-42c3-85cf-23e8ed977434"
+      }
     }
   }
 }

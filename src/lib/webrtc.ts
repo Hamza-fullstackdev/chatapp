@@ -6,9 +6,11 @@ import {
   MediaStream,
   type MediaStreamTrack,
 } from 'react-native-webrtc';
+import { callsApi } from '@/lib/api';
+import type { IceServerDTO } from '@/types/api';
 
 export interface SignalData {
-  type: 'offer' | 'answer' | 'ice';
+  type: 'offer' | 'answer' | 'ice' | 'request-offer';
   data: unknown;
 }
 
@@ -17,10 +19,42 @@ export interface OutboundSignal {
   data: unknown;
 }
 
-const iceServers: RTCIceServer[] = [
+const fallbackIceServers: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
 ];
+
+let cachedIceServers: RTCIceServer[] | null = null;
+
+/**
+ * Fetch the ICE servers (STUN + optional short-lived TURN credentials) the
+ * server publishes for call media. Falls back to public STUN when the request
+ * fails so a call can still start (and succeed on networks with permissive
+ * NATs). Values are cached for the app lifetime.
+ */
+async function loadIceServers(): Promise<RTCIceServer[]> {
+  if (cachedIceServers) return cachedIceServers;
+  try {
+    const { iceServers } = await callsApi.iceConfig();
+    const servers = (Array.isArray(iceServers) ? iceServers : []).map(toRtcIceServer);
+    if (servers.length > 0) {
+      cachedIceServers = servers;
+      return servers;
+    }
+  } catch {
+    // Fall through to the static STUN list below.
+  }
+  cachedIceServers = fallbackIceServers;
+  return fallbackIceServers;
+}
+
+function toRtcIceServer(dto: IceServerDTO): RTCIceServer {
+  return {
+    urls: dto.urls,
+    username: dto.username,
+    credential: dto.credential,
+  };
+}
 
 async function captureLocalStream(video: boolean): Promise<MediaStream | null> {
   try {
@@ -48,6 +82,7 @@ export async function createCallPeerConnection(
   onSignal: (packet: OutboundSignal) => void,
   onRemoteStream: (stream: MediaStream) => void,
 ): Promise<{ pc: RTCPeerConnection; localStream: MediaStream | null }> {
+  const iceServers = await loadIceServers();
   const pc = new RTCPeerConnection({ iceServers });
   const localStream = await captureLocalStream(video);
 
@@ -117,6 +152,14 @@ export async function handleIncomingSignal(
   pc: RTCPeerConnection,
   signal: SignalData,
 ): Promise<OutboundSignal | null> {
+  if (signal.type === 'request-offer') {
+    // A peer that joined (or recovered) the call asks for our current offer so
+    // it never has to wait for the next re-announcement tick.
+    if (pc.localDescription && pc.localDescription.type === 'offer') {
+      return { type: 'offer', data: pc.localDescription.toJSON() };
+    }
+    return null;
+  }
   if (signal.type === 'offer') {
     await pc.setRemoteDescription(toDescription(signal.data));
     const answer = await pc.createAnswer();
@@ -171,6 +214,23 @@ export async function sendOffer(pc: RTCPeerConnection, onSignal: (packet: Outbou
 
 export function stopTracks(stream: MediaStream | null): void {
   stream?.getTracks().forEach((t: MediaStreamTrack) => t.stop());
+}
+
+/**
+ * Mute/unmute every local track of a given kind (audio or video) without
+ * tearing down the peer connection — the remote side simply hears/sees silence.
+ */
+export function setLocalTracksEnabled(
+  stream: MediaStream | null,
+  kind: 'audio' | 'video',
+  enabled: boolean,
+): void {
+  stream
+    ?.getTracks()
+    .filter((t: MediaStreamTrack) => t.kind === kind)
+    .forEach((t: MediaStreamTrack) => {
+      t.enabled = enabled;
+    });
 }
 
 export function closePeer(pc: RTCPeerConnection | null, stream: MediaStream | null) {

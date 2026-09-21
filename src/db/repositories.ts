@@ -518,24 +518,46 @@ export async function setMessageStatus(
   await db.runAsync('UPDATE messages SET status = ? WHERE id = ?', status, id);
 }
 
-export async function setMessageDelivered(db: SQLiteDatabase, id: string): Promise<void> {
-  await db.runAsync(
-    "UPDATE messages SET status = 'delivered' WHERE id = ? AND status NOT IN ('read', 'failed')",
-    id,
-  );
-}
-
-export async function setMessageReadStatus(
+/**
+ * Mark this sender's messages in a conversation as 'delivered' up to and
+ * including `throughMessageId` (matching the server's flip boundary). Never
+ * upgrades past delivered and never downgrades read/failed rows.
+ */
+export async function markMessagesDeliveredThrough(
   db: SQLiteDatabase,
   conversationId: string,
   senderId: string,
-  messageId: string,
+  throughMessageId: string,
 ): Promise<void> {
   await db.runAsync(
-    "UPDATE messages SET status = 'read' WHERE conversation_id = ? AND sender_id = ? AND id = ?",
+    `UPDATE messages SET status = 'delivered'
+     WHERE conversation_id = ? AND sender_id = ?
+       AND status = 'sent'
+       AND created_at <= (SELECT created_at FROM messages WHERE id = ?)`,
     conversationId,
     senderId,
-    messageId,
+    throughMessageId,
+  );
+}
+
+/**
+ * Mark this sender's messages in a conversation as 'read' up to and including
+ * `throughMessageId`. Never downgrades already-read rows.
+ */
+export async function markMessagesReadThrough(
+  db: SQLiteDatabase,
+  conversationId: string,
+  senderId: string,
+  throughMessageId: string,
+): Promise<void> {
+  await db.runAsync(
+    `UPDATE messages SET status = 'read'
+     WHERE conversation_id = ? AND sender_id = ?
+       AND status IN ('sent', 'delivered')
+       AND created_at <= (SELECT created_at FROM messages WHERE id = ?)`,
+    conversationId,
+    senderId,
+    throughMessageId,
   );
 }
 
@@ -785,10 +807,8 @@ export async function mediaCacheSize(db: SQLiteDatabase): Promise<number> {
 
 type UserProfileRow = {
   id: string;
-  name: string | null;
+  full_name: string | null;
   username: string | null;
-  email: string | null;
-  phone: string | null;
   bio: string | null;
   avatar_url: string | null;
   last_seen_at: string | null;
@@ -797,16 +817,14 @@ type UserProfileRow = {
 
 export type StoredProfile = Pick<
   UserDTO,
-  'id' | 'name' | 'username' | 'email' | 'phone' | 'bio' | 'avatarUrl' | 'lastSeenAt'
+  'id' | 'fullName' | 'username' | 'bio' | 'avatarUrl' | 'lastSeenAt'
 >;
 
 function rowToProfile(row: UserProfileRow): StoredProfile {
   return {
     id: row.id,
-    name: row.name ?? '',
+    fullName: row.full_name ?? '',
     username: row.username ?? '',
-    email: row.email,
-    phone: row.phone,
     bio: row.bio,
     avatarUrl: row.avatar_url,
     lastSeenAt: row.last_seen_at,
@@ -818,22 +836,18 @@ export async function upsertUserProfile(
   profile: Partial<StoredProfile> & Pick<UserDTO, 'id'>,
 ): Promise<void> {
   await db.runAsync(
-    `INSERT INTO user_profiles (id, name, username, email, phone, bio, avatar_url, last_seen_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO user_profiles (id, full_name, username, bio, avatar_url, last_seen_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
-       name = COALESCE(excluded.name, name),
+       full_name = COALESCE(excluded.full_name, full_name),
        username = COALESCE(excluded.username, username),
-       email = COALESCE(excluded.email, email),
-       phone = COALESCE(excluded.phone, phone),
        bio = COALESCE(excluded.bio, bio),
        avatar_url = COALESCE(excluded.avatar_url, avatar_url),
        last_seen_at = COALESCE(excluded.last_seen_at, last_seen_at),
        updated_at = excluded.updated_at`,
     profile.id,
-    profile.name !== undefined ? profile.name : null,
+    profile.fullName !== undefined ? profile.fullName : null,
     profile.username !== undefined ? profile.username : null,
-    profile.email !== undefined ? profile.email : null,
-    profile.phone !== undefined ? profile.phone : null,
     profile.bio !== undefined ? profile.bio : null,
     profile.avatarUrl !== undefined ? profile.avatarUrl : null,
     profile.lastSeenAt !== undefined ? profile.lastSeenAt : null,
@@ -849,10 +863,8 @@ export async function cacheUsers(db: SQLiteDatabase, users: UserDTO[]): Promise<
   for (const u of users) {
     await upsertUserProfile(db, {
       id: u.id,
-      name: u.name,
+      fullName: u.fullName,
       username: u.username,
-      email: u.email,
-      phone: u.phone,
       bio: u.bio,
       avatarUrl: u.avatarUrl,
       lastSeenAt: u.lastSeenAt,
@@ -868,26 +880,22 @@ export async function cacheUsers(db: SQLiteDatabase, users: UserDTO[]): Promise<
 export async function touchUserProfile(
   db: SQLiteDatabase,
   id: string,
-  partial?: Partial<Pick<UserDTO, 'name' | 'username' | 'email' | 'phone' | 'bio' | 'avatarUrl' | 'lastSeenAt'>>,
+  partial?: Partial<Pick<UserDTO, 'fullName' | 'username' | 'bio' | 'avatarUrl' | 'lastSeenAt'>>,
 ): Promise<void> {
   if (!id) return;
   await db.runAsync(
-    `INSERT INTO user_profiles (id, name, username, email, phone, bio, avatar_url, last_seen_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO user_profiles (id, full_name, username, bio, avatar_url, last_seen_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
-       name = COALESCE(excluded.name, name),
+       full_name = COALESCE(excluded.full_name, full_name),
        username = COALESCE(excluded.username, username),
-       email = COALESCE(excluded.email, email),
-       phone = COALESCE(excluded.phone, phone),
        bio = COALESCE(excluded.bio, bio),
        avatar_url = COALESCE(excluded.avatar_url, avatar_url),
        last_seen_at = COALESCE(excluded.last_seen_at, last_seen_at),
        updated_at = excluded.updated_at`,
     id,
-    partial?.name ?? null,
+    partial?.fullName ?? null,
     partial?.username ?? null,
-    partial?.email ?? null,
-    partial?.phone ?? null,
     partial?.bio ?? null,
     partial?.avatarUrl ?? null,
     partial?.lastSeenAt ?? null,
@@ -927,13 +935,13 @@ export async function listAllUserProfiles(
   const rows = q
     ? await db.getAllAsync<UserProfileRow>(
         `SELECT * FROM user_profiles
-         WHERE name LIKE ? OR username LIKE ?
-         ORDER BY name COLLATE NOCASE ASC`,
+         WHERE full_name LIKE ? OR username LIKE ?
+         ORDER BY full_name COLLATE NOCASE ASC`,
         `%${q}%`,
         `%${q}%`,
       )
     : await db.getAllAsync<UserProfileRow>(
-        'SELECT * FROM user_profiles ORDER BY name COLLATE NOCASE ASC',
+        'SELECT * FROM user_profiles ORDER BY full_name COLLATE NOCASE ASC',
       );
   return rows.map(rowToProfile);
 }

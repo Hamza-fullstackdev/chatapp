@@ -79,10 +79,10 @@ export default function ContactsScreen() {
       style={({ pressed }) => [styles.row, { backgroundColor: pressed ? colors.divider : colors.background }]}
       android_ripple={{ color: colors.divider }}
     >
-      <Avatar name={item.name} uri={item.avatarUrl} size={48} />
+      <Avatar name={item.fullName} uri={item.avatarUrl} size={48} />
       <View style={styles.info}>
         <Text style={[styles.name, { color: colors.text }]} numberOfLines={1}>
-          {item.name}
+          {item.fullName}
         </Text>
         <Text style={[styles.username, { color: colors.textSecondary }]} numberOfLines={1}>
           @{item.username}

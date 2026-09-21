@@ -5,6 +5,7 @@ import type {
   ConversationDTO,
   ConversationDetailDTO,
   GroupDetailDTO,
+  IceServerDTO,
   MessageDTO,
   ReactionDTO,
   StickerDTO,
@@ -30,14 +31,14 @@ export type AttachmentPayload = {
 };
 
 export const authApi = {
-  login(identifier: string, code: string): Promise<AuthResponse> {
-    return http.post<AuthResponse>('/api/auth/login', { identifier, code });
+  login(username: string, password: string): Promise<AuthResponse> {
+    return http.post<AuthResponse>('/api/auth/login', { username, password });
   },
   register(input: {
-    name: string;
+    fullName: string;
     username: string;
-    code?: string;
-    email?: string;
+    password: string;
+    bio?: string | null;
   }): Promise<AuthResponse> {
     return http.post<AuthResponse>('/api/auth/register', input);
   },
@@ -48,11 +49,9 @@ export const authApi = {
     return http.get<UserDTO>('/api/auth/me');
   },
   updateMe(input: {
-    name?: string;
+    fullName?: string;
     username?: string;
     bio?: string | null;
-    email?: string | null;
-    phone?: string | null;
     avatarUrl?: string | null;
   }): Promise<UserDTO> {
     return http.patch<UserDTO>('/api/auth/me', input);
@@ -197,6 +196,9 @@ export const callsApi = {
     status: 'accepted' | 'rejected' | 'ended' | 'cancelled' | 'missed',
   ): Promise<{ call: CallDTO }> {
     return http.patch<{ call: CallDTO }>(`/api/calls/${id}`, { status });
+  },
+  iceConfig(): Promise<{ iceServers: IceServerDTO[] }> {
+    return http.get<{ iceServers: IceServerDTO[] }>('/api/calls/ice-config');
   },
 };
 

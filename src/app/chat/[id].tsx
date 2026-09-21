@@ -28,6 +28,7 @@ import {
   useAudioRecorder,
   useAudioRecorderState,
 } from 'expo-audio';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Image } from 'expo-image';
 import { useAuth } from '@/context/auth-context';
@@ -46,11 +47,11 @@ import {
   listUserProfiles,
   markConversationRead,
   getConversation,
-  setMessageDelivered as persistDelivered,
-  setMessageReadStatus as persistRead,
   setMessageReactions as persistReactions,
   deleteMessageRow as persistDelete,
   deleteMessagesLocal as persistDeleteMany,
+  markMessagesDeliveredThrough as persistDelivered,
+  markMessagesReadThrough as persistRead,
   upsertMessage as persistMessage,
   upsertConversation as persistConversation,
   upsertUserProfile as persistUserProfile,
@@ -487,7 +488,7 @@ export default function ChatScreen() {
         for (const member of loaded.members) {
           await persistUserProfile(db, {
             id: member.id,
-            name: member.name,
+            fullName: member.name,
             username: member.username,
             avatarUrl: member.avatarUrl,
             lastSeenAt: null,
@@ -589,7 +590,10 @@ export default function ChatScreen() {
     setOptimistic((prev) =>
       prev.filter((o) => o.clientMessageId !== message.clientMessageId),
     );
-    setBase((prev) => mergeBase(prev, [{ ...message, status: 'sent' }]));
+    // Keep the server's status: if a recipient was already online the message
+    // returns as 'delivered', and forcing it back to 'sent' would regress the
+    // double grey tick that the realtime receipt just persisted.
+    setBase((prev) => mergeBase(prev, [message]));
     persist(message);
   };
 
@@ -651,11 +655,22 @@ export default function ChatScreen() {
 
   useSocketEvent<MessageReadEvent>('message:read', (event) => {
     if (event.conversationId !== conversationId) return;
-    setBase((prev) =>
-      prev.map((m) =>
-        m.senderId === myId && m.id === event.messageId ? { ...m, status: 'read' } : m,
-      ),
-    );
+    // Ignore the read receipt we broadcast when reading the chat ourselves —
+    // it would mark our own outgoing bubbles as read (self blue ticks).
+    if (event.userId === myId) return;
+    setBase((prev) => {
+      const through = prev.find((m) => m.id === event.messageId);
+      const throughAt = through?.createdAt ? new Date(through.createdAt).getTime() : null;
+      return prev.map((m) =>
+        m.senderId === myId &&
+        (m.status === 'sent' || m.status === 'delivered') &&
+        (throughAt === null
+          ? m.id === event.messageId
+          : new Date(m.createdAt).getTime() <= throughAt)
+          ? { ...m, status: 'read' }
+          : m,
+      );
+    });
     void (async () => {
       const db = await getDb();
       await persistRead(db, conversationId, myId, event.messageId);
@@ -664,16 +679,21 @@ export default function ChatScreen() {
 
   useSocketEvent<MessageDeliveredEvent>('message:delivered', (event) => {
     if (event.conversationId !== conversationId) return;
-    setBase((prev) =>
-      prev.map((m) =>
-        m.id === event.messageId && m.status !== 'read'
+    setBase((prev) => {
+      const through = prev.find((m) => m.id === event.messageId);
+      const throughAt = through?.createdAt ? new Date(through.createdAt).getTime() : null;
+      return prev.map((m) =>
+        m.status === 'sent' &&
+        (throughAt === null
+          ? m.id === event.messageId
+          : new Date(m.createdAt).getTime() <= throughAt)
           ? { ...m, status: 'delivered' }
           : m,
-      ),
-    );
+      );
+    });
     void (async () => {
       const db = await getDb();
-      await persistDelivered(db, event.messageId);
+      await persistDelivered(db, conversationId, myId, event.messageId);
     })();
   });
 
@@ -1548,7 +1568,7 @@ export default function ChatScreen() {
   }
 
   const typingNames = typingUsers
-    .map((id) => profiles.get(id)?.name ?? detail?.members.find((m) => m.id === id)?.name ?? 'Someone')
+    .map((id) => profiles.get(id)?.fullName ?? detail?.members.find((m) => m.id === id)?.name ?? 'Someone')
     .join(', ');
 
   return (
@@ -1632,7 +1652,7 @@ export default function ChatScreen() {
                 isOwn={item.senderId === myId}
                 showSenderName={isGroup && item.senderId !== myId}
                 senderName={
-                  profiles.get(item.senderId)?.name ?? detail?.members.find((m) => m.id === item.senderId)?.name
+                  profiles.get(item.senderId)?.fullName ?? detail?.members.find((m) => m.id === item.senderId)?.name
                 }
                 replyPreview={
                   ref
@@ -1931,7 +1951,7 @@ export default function ChatScreen() {
       )}
 
       {/* Full-screen media viewer */}
-      {viewer && <ImageViewerModal attachment={viewer} onClose={() => setViewer(null)} />}
+      {viewer && <MediaViewerModal attachment={viewer} onClose={() => setViewer(null)} />}
 
       {/* Header (⋮) options menu */}
       <Modal transparent visible={headerMenuOpen} animationType="fade" onRequestClose={() => setHeaderMenuOpen(false)}>
@@ -2158,10 +2178,7 @@ function MediaPreviewModal({
           {preview.type === 'image' ? (
             <Image source={{ uri: preview.uri }} style={styles.previewImage} contentFit="contain" />
           ) : (
-            <View style={styles.previewVideoPlaceholder}>
-              <Ionicons name="videocam" size={56} color="rgba(255,255,255,0.85)" />
-              <Text style={styles.previewVideoText}>Video ready to send</Text>
-            </View>
+            <VideoPreviewUri uri={preview.uri} />
           )}
         </View>
         <View style={styles.previewFooter}>
@@ -2207,32 +2224,84 @@ function MediaPreviewModal({
   );
 }
 
-function ImageViewerModal({
+/** Pre-send preview of a picked video: plays the local file with controls. */
+function VideoPreviewUri({ uri }: { uri: string }) {
+  const player = useVideoPlayer({ uri }, (p) => {
+    p.loop = false;
+  });
+  useEffect(() => {
+    player.play();
+  }, [player]);
+  return <VideoView player={player} style={styles.previewVideo} contentFit="contain" nativeControls />;
+}
+
+/** Fullscreen video player for the media viewer. */
+function VideoViewerAttachment({ attachment }: { attachment: AttachmentDTO }) {
+  const source = useAttachmentSource(attachment);
+  const url = source.url;
+  const player = useVideoPlayer(url ? { uri: url } : null, (p) => {
+    p.loop = false;
+  });
+
+  const loadedUrl = useRef<string | null>(null);
+  useEffect(() => {
+    if (!url || loadedUrl.current === url) return;
+    loadedUrl.current = url;
+    player
+      .replaceAsync(url)
+      .then(() => player.play())
+      .catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [url]);
+
+  if (!url) {
+    return (
+      <View style={styles.viewerLoading}>
+        <ActivityIndicator size="large" color="#FFFFFF" />
+      </View>
+    );
+  }
+  return (
+    <View style={styles.viewerVideo}>
+      <VideoView player={player} style={styles.previewImage} contentFit="contain" nativeControls />
+    </View>
+  );
+}
+
+function MediaViewerModal({
   attachment,
   onClose,
 }: {
   attachment: AttachmentDTO;
   onClose: () => void;
 }) {
-  // Offline-first image viewer: uses the local cached file when available.
-  const source = useAttachmentSource(attachment);
-  const url = source.url;
-
+  // Offline-first viewer: uses the local cached file when available.
+  // Images use expo-image; videos play fullscreen via expo-video.
   return (
     <Modal visible animationType="fade" onRequestClose={onClose} statusBarTranslucent>
       <View style={[styles.previewOverlay, { backgroundColor: '#000000' }]}>
         <Pressable hitSlop={10} style={styles.viewerClose} onPress={onClose}>
           <Ionicons name="close" size={28} color="#FFFFFF" />
         </Pressable>
-        {url ? (
-          <Image source={{ uri: url }} style={styles.previewImage} contentFit="contain" transition={150} />
+        {attachment.type === 'video' ? (
+          <VideoViewerAttachment attachment={attachment} />
         ) : (
-          <View style={styles.viewerLoading}>
-            <ActivityIndicator size="large" color="#FFFFFF" />
-          </View>
+          <ImageViewerBody attachment={attachment} />
         )}
       </View>
     </Modal>
+  );
+}
+
+function ImageViewerBody({ attachment }: { attachment: AttachmentDTO }) {
+  const source = useAttachmentSource(attachment);
+  const url = source.url;
+  return url ? (
+    <Image source={{ uri: url }} style={styles.previewImage} contentFit="contain" transition={150} />
+  ) : (
+    <View style={styles.viewerLoading}>
+      <ActivityIndicator size="large" color="#FFFFFF" />
+    </View>
   );
 }
 
@@ -2250,8 +2319,8 @@ const styles = StyleSheet.create({
   previewTitle: { color: '#FFFFFF', fontSize: 16, fontWeight: '600' },
   previewBody: { flex: 1, justifyContent: 'center' },
   previewImage: { flex: 1, width: '100%' },
-  previewVideoPlaceholder: { alignItems: 'center', gap: 12 },
-  previewVideoText: { color: 'rgba(255,255,255,0.7)', fontSize: 14 },
+  previewVideo: { flex: 1, width: '100%' },
+  viewerVideo: { flex: 1 },
   previewFooter: {
     flexDirection: 'row',
     alignItems: 'center',

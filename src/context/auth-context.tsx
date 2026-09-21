@@ -16,7 +16,7 @@ interface AuthValue {
   status: AuthStatus;
   user: UserDTO | null;
   token: string | null;
-  signIn: (identifier: string, code: string) => Promise<void>;
+  signIn: (username: string, password: string) => Promise<void>;
   completeAuth: (token: string, user: UserDTO, refreshToken?: string) => Promise<void>;
   signOut: () => Promise<void>;
   updateUser: (user: UserDTO) => void;
@@ -34,10 +34,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const db = await getDb();
       await upsertUserProfile(db, {
         id: u.id,
-        name: u.name,
+        fullName: u.fullName,
         username: u.username,
-        email: u.email,
-        phone: u.phone,
         bio: u.bio,
         avatarUrl: u.avatarUrl,
         lastSeenAt: u.lastSeenAt,
@@ -89,8 +87,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     void registerDeviceForPush().catch(() => undefined);
   };
 
-  const signIn = async (identifier: string, code: string) => {
-    const { token: newToken, refreshToken, user: authedUser } = await authApi.login(identifier, code);
+  const signIn = async (username: string, password: string) => {
+    const { token: newToken, refreshToken, user: authedUser } = await authApi.login(username, password);
     await setRefreshToken(refreshToken);
     await applyCredentials(newToken, authedUser);
   };

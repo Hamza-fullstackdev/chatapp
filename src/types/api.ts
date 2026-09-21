@@ -1,9 +1,7 @@
 export interface UserDTO {
   id: string;
-  name: string;
+  fullName: string;
   username: string;
-  email: string | null;
-  phone: string | null;
   bio: string | null;
   avatarUrl: string | null;
   lastSeenAt: string | null;
@@ -224,6 +222,12 @@ export interface IncomingCallEvent {
 export interface CallSignalEvent {
   from: string;
   callId: string;
-  type: 'offer' | 'answer' | 'ice';
+  type: 'offer' | 'answer' | 'ice' | 'request-offer';
   data: unknown;
+}
+
+export interface IceServerDTO {
+  urls: string | string[];
+  username?: string;
+  credential?: string;
 }

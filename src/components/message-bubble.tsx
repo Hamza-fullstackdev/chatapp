@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Animated, PanResponder, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Animated, PanResponder, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useEvent } from 'expo';
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import type { AttachmentDTO, MessageDTO } from '@/types/api';
 import { formatMessageTime } from '@/lib/format';
@@ -215,12 +217,128 @@ function DownloadChip({ attachment }: { attachment: AttachmentDTO }) {
   );
 }
 
-function AttachmentMedia({ attachment, isOwn }: { attachment: AttachmentDTO; isOwn: boolean }) {
+/**
+ * WhatsApp-style video bubble: renders the video's first frame exactly like an
+ * image tile (with a play glyph, duration chip and download chip on top).
+ * Tapping a paused tile starts inline playback with native controls; the small
+ * expand button (or tapping again while playing) opens the fullscreen viewer.
+ *
+ * Playback is fed the locally-cached file when available and otherwise streams
+ * the remote URL — the source resolver hot-swaps to the cache once a background
+ * download lands.
+ */
+function VideoAttachment({
+  attachment,
+  onOpen,
+  onLongPress,
+}: {
+  attachment: AttachmentDTO;
+  onOpen?: () => void;
+  onLongPress?: () => void;
+}) {
+  const { colors } = useWaTheme();
+  const source = useAttachmentSource(attachment);
+  const url = source.url;
+  const [frameReady, setFrameReady] = useState(false);
+
+  const player = useVideoPlayer(url ? { uri: url } : null, (p) => {
+    p.loop = false;
+  });
+
+  // Once the cached local file appears (background download finished), swap
+  // the source so playback is offline-first. Skipped when the URL is unchanged
+  // (useVideoPlayer already loaded it on first mount).
+  const loadedUrl = useRef<string | null>(null);
+  useEffect(() => {
+    if (!url || loadedUrl.current === url) return;
+    loadedUrl.current = url;
+    player.replaceAsync(url).catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [url]);
+
+  const { isPlaying } = useEvent(player, 'playingChange', { isPlaying: player.playing });
+
+  const durationSecs =
+    attachment.durationMs && attachment.durationMs > 0
+      ? attachment.durationMs / 1000
+      : player.duration > 0
+        ? player.duration
+        : null;
+
+  if (!url) {
+    return <View style={[styles.mediaPlaceholder, { backgroundColor: colors.divider }]} />;
+  }
+
+  return (
+    <View style={styles.mediaContainer}>
+      <VideoView
+        player={player}
+        style={styles.mediaImage}
+        contentFit="cover"
+        nativeControls={isPlaying}
+        surfaceType={Platform.OS === 'android' ? 'textureView' : undefined}
+        onFirstFrameRender={() => setFrameReady(true)}
+      />
+      {!frameReady && (
+        <View style={styles.videoPreviewLoading}>
+          <ActivityIndicator size="small" color="#FFFFFF" />
+        </View>
+      )}
+      {!isPlaying && (
+        <Pressable
+          delayLongPress={250}
+          style={({ pressed }) => [styles.videoPlayOverlay, pressed && { opacity: 0.8 }]}
+          onPress={() => {
+            try {
+              player.play();
+            } catch {
+              // Player not ready yet — the overlay stays until it is.
+            }
+          }}
+          onLongPress={onLongPress ? () => onLongPress() : undefined}
+        >
+          <View style={styles.videoPlayBtn}>
+            <Ionicons name="play" size={30} color="#FFFFFF" style={styles.videoPlayIcon} />
+          </View>
+        </Pressable>
+      )}
+      {durationSecs !== null && !isPlaying && (
+        <View style={styles.videoDurationChip}>
+          <Text style={styles.videoDurationText}>{formatPlayDuration(durationSecs)}</Text>
+        </View>
+      )}
+      <View style={styles.downloadChipOverlay}>
+        <DownloadChip attachment={attachment} />
+      </View>
+      {onOpen && (
+        <Pressable hitSlop={8} style={styles.videoExpandBtn} onPress={onOpen}>
+          <Ionicons name="expand" size={15} color="#FFFFFF" />
+        </Pressable>
+      )}
+    </View>
+  );
+}
+
+function AttachmentMedia({
+  attachment,
+  isOwn,
+  onOpen,
+  onLongPress,
+}: {
+  attachment: AttachmentDTO;
+  isOwn: boolean;
+  onOpen?: () => void;
+  onLongPress?: () => void;
+}) {
   const { colors } = useWaTheme();
   // Offline-first: resolves to the locally-cached file when downloaded,
   // else falls back to the remote URL and warms the cache in the background.
   const source = useAttachmentSource(attachment);
   const url = source.url;
+
+  if (attachment.type === 'video') {
+    return <VideoAttachment attachment={attachment} onOpen={onOpen} onLongPress={onLongPress} />;
+  }
 
   if (attachment.type === 'image' || attachment.type === 'gif' || attachment.type === 'sticker') {
     if (!url) {
@@ -252,12 +370,7 @@ function AttachmentMedia({ attachment, isOwn }: { attachment: AttachmentDTO; isO
     );
   }
 
-  const name =
-    attachment.type === 'video'
-      ? 'videocam'
-      : attachment.type === 'file'
-        ? 'document-attach'
-        : 'document';
+  const name = attachment.type === 'file' ? 'document-attach' : 'document';
   return (
     <View style={[styles.fileBox, { backgroundColor: colors.background }]}>
       <Ionicons name={name} size={26} color={colors.brand} />
@@ -319,9 +432,9 @@ export function MessageBubble({
     });
   }, [swipeEnabled, translateX, onSwipeToReply, message]);
 
-  const images = message.attachments.filter((a) => a.type === 'image' || a.type === 'gif');
+  const images = message.attachments.filter((a) => a.type === 'image' || a.type === 'gif' || a.type === 'video');
   const stickers = message.attachments.filter((a) => a.type === 'sticker');
-  const others = message.attachments.filter((a) => a.type === 'video' || a.type === 'audio' || a.type === 'file');
+  const others = message.attachments.filter((a) => a.type === 'audio' || a.type === 'file');
 
   // When an image is the whole message, overlay the timestamp on the photo
   // corner like WhatsApp instead of a separate row underneath it.
@@ -372,7 +485,15 @@ export function MessageBubble({
   const mediaStack = (list: AttachmentDTO[], overlayOnLast: boolean) =>
     list.map((a, index) => {
       const isLast = index === list.length - 1;
-      const media = <AttachmentMedia key={a.id} attachment={a} isOwn={isOwn} />;
+      const media = (
+        <AttachmentMedia
+          key={a.id}
+          attachment={a}
+          isOwn={isOwn}
+          onOpen={onOpenMedia && a.type !== 'audio' && a.type !== 'file' ? () => onOpenMedia(a) : undefined}
+          onLongPress={onLongPress ? () => onLongPress(message) : undefined}
+        />
+      );
       const wrapped = onOpenMedia || onPress ? (
         <Pressable
           key={a.id}
@@ -611,6 +732,55 @@ const styles = StyleSheet.create({
     width: 220,
     height: 220,
     borderRadius: 6,
+  },
+  videoPreviewLoading: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.25)',
+  },
+  videoPlayOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  videoPlayBtn: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  videoPlayIcon: { marginLeft: 3 },
+  videoDurationChip: {
+    position: 'absolute',
+    bottom: 8,
+    left: 8,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    borderRadius: 4,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+  },
+  videoDurationText: { color: '#FFFFFF', fontSize: 11, fontWeight: '600' },
+  videoExpandBtn: {
+    position: 'absolute',
+    top: 6,
+    left: 6,
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   metaOverlay: {
     position: 'absolute',

@@ -7,9 +7,9 @@ import {
   getConversation,
   getUserProfile,
   markConversationLastMessageStatus,
+  markMessagesDeliveredThrough,
+  markMessagesReadThrough,
   refreshConversationFromMessage,
-  setMessageDelivered,
-  setMessageReadStatus,
   setMessageReactions,
   touchUserProfile,
   upsertMessage,
@@ -19,6 +19,7 @@ import { prewarmMessageMedia } from '@/lib/media-cache';
 import { notifyLocalDb } from '@/lib/local-db-events';
 import { presentIncomingMessageNotification } from '@/lib/notifications';
 import { previewText } from '@/lib/format';
+import { sendMessageReceived } from '@/lib/socket';
 import type {
   MessageDTO,
   MessageDeliveredEvent,
@@ -47,7 +48,7 @@ async function notifyIncomingMessage(db: SQLiteDatabase, message: MessageDTO): P
   try {
     const conv = await getConversation(db, message.conversationId);
     const sender = await getUserProfile(db, message.senderId);
-    const senderName = sender?.name?.trim() || sender?.username?.trim();
+    const senderName = sender?.fullName?.trim() || sender?.username?.trim();
     let title: string;
     if (conv?.type === 'group') {
       title = conv?.name?.trim() || senderName || 'New message';
@@ -80,6 +81,13 @@ export function installRealtimeHandlers(socket: Socket, currentUserId: string): 
       });
       prewarmMessageMedia(message, currentUserId);
       notifyLocalDb();
+
+      // The device now holds the message: acknowledge it so the sender's tick
+      // moves from single grey (sent) to double grey (delivered), exactly
+      // like WhatsApp. Skip our own echoes.
+      if (message.senderId !== currentUserId) {
+        sendMessageReceived(message.conversationId, message.id);
+      }
 
       // Banner the incoming message (WhatsApp-style): skip our own echoes and
       // whatever conversation we are currently reading on screen.
@@ -124,10 +132,13 @@ export function installRealtimeHandlers(socket: Socket, currentUserId: string): 
 
   const onMessageRead = (event: MessageReadEvent) => {
     run(async () => {
+      // Ignore receipts we broadcast ourselves (our own read events land back
+      // on this device). Otherwise our own outgoing messages would be marked
+      // "read" simply because we read the chat — the self-blue-tick bug.
+      if (event.userId === currentUserId) return;
       const db = await getDb();
-      const messageId = event.messageId;
-      await setMessageReadStatus(db, event.conversationId, currentUserId, messageId);
-      await markConversationLastMessageStatus(db, event.conversationId, messageId, 'read');
+      await markMessagesReadThrough(db, event.conversationId, currentUserId, event.messageId);
+      await markConversationLastMessageStatus(db, event.conversationId, event.messageId, 'read');
       notifyLocalDb();
     });
   };
@@ -135,7 +146,7 @@ export function installRealtimeHandlers(socket: Socket, currentUserId: string): 
   const onMessageDelivered = (event: MessageDeliveredEvent) => {
     run(async () => {
       const db = await getDb();
-      await setMessageDelivered(db, event.messageId);
+      await markMessagesDeliveredThrough(db, event.conversationId, currentUserId, event.messageId);
       await markConversationLastMessageStatus(db, event.conversationId, event.messageId, 'delivered');
       notifyLocalDb();
     });

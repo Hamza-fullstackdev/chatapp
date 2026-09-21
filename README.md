@@ -11,7 +11,7 @@ There is no Next.js and no MongoDB. Redis is intentionally **not** used — pres
 
 | Area | Details |
 | --- | --- |
-| Auth | OTP-based login (dev OTP `1234`), register/login, JWT access + refresh tokens, refresh-on-401 in the client, logout, profile update, change password |
+| Auth | Username + password login, register/login, JWT access + refresh tokens, refresh-on-401 in the client, logout, profile update, change password |
 | Chat | 1:1 and group conversations, realtime delivery over Socket.IO, typing indicators, read receipts, presence |
 | Messages | text, image, video, audio, file, GIF, sticker; replies, edits, soft deletes, emoji reactions |
 | Groups | create groups, add/remove members, promote/demote admins, rename, description |

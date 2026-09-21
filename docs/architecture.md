@@ -39,7 +39,7 @@ every connected member.
 
 | Route group | Highlights |
 | --- | --- |
-| `/api/auth` | `login` (OTP), `register`, `refresh`, `logout`, `me`, `updateMe`, `changePassword` |
+| `/api/auth` | `login` (username + password), `register`, `refresh`, `logout`, `me`, `updateMe`, `changePassword` |
 | `/api/users` | list/search users |
 | `/api/conversations` | list, detail (with messages), create private, mark read |
 | `/api/messages` | send (with attachment passthrough), `PATCH` edit, `DELETE`, `POST/DELETE /reactions` |
@@ -80,8 +80,8 @@ The server joins each socket to `user:<id>` for targeted events and to
 
 ## Auth flow
 
-1. `POST /api/auth/login` with a phone and OTP. Development OTP is `1234`; production hashes the
-   OTP (`otp_hash`) with an expiry.
+1. `POST /api/auth/login` with a username and password. The password is bcrypt-verified against
+   `password_hash`; the username is matched case-insensitively (unique lower-case index).
 2. The API returns an access token (short TTL) and a refresh token (long TTL).
 3. The app stores the refresh token and device id in **SecureStore** (`app/src/lib/secure.ts`);
    on web it falls back to `AsyncStorage`.

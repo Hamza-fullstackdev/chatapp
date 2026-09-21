@@ -10,19 +10,24 @@ import { useWaTheme } from '@/context/theme-context';
 export default function LoginScreen() {
   const { signIn } = useAuth();
   const { colors, dark } = useWaTheme();
-  const [identifier, setIdentifier] = useState('');
-  const [code, setCode] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
 
   const submit = async () => {
     if (busy) return;
-    if (!identifier.trim() || !code.trim()) {
-      Alert.alert('Missing details', 'Enter your username/email/phone and the 6-digit code.');
+    const user = username.trim().replace(/\s+/g, '');
+    if (!user) {
+      Alert.alert('Missing details', 'Enter your username.');
+      return;
+    }
+    if (!password) {
+      Alert.alert('Missing details', 'Enter your password.');
       return;
     }
     setBusy(true);
     try {
-      await signIn(identifier.trim(), code.trim());
+      await signIn(user, password);
     } catch (e) {
       Alert.alert('Login failed', e instanceof Error ? e.message : 'Could not sign in');
     } finally {
@@ -38,16 +43,16 @@ export default function LoginScreen() {
             <Image source={require('@/assets/images/launcher.png')} style={styles.logo} contentFit="cover" />
           </View>
           <Text style={styles.title}>chat-app</Text>
-          <Text style={styles.subtitle}>Sign in with your account</Text>
+          <Text style={styles.subtitle}>Sign in with your username</Text>
         </View>
 
         <View style={[styles.card, { backgroundColor: dark ? colors.backgroundSecondary : '#FFFFFF' }]}>
           <View style={[styles.field, { backgroundColor: dark ? colors.incomingBubble : colors.backgroundSecondary }]}>
             <Ionicons name="person-outline" size={20} color={colors.textSecondary} style={styles.fieldIcon} />
             <TextInput
-              value={identifier}
-              onChangeText={setIdentifier}
-              placeholder="Username, email or phone"
+              value={username}
+              onChangeText={setUsername}
+              placeholder="Username"
               placeholderTextColor={colors.textSecondary}
               autoCapitalize="none"
               autoCorrect={false}
@@ -56,14 +61,14 @@ export default function LoginScreen() {
           </View>
 
           <View style={[styles.field, { backgroundColor: dark ? colors.incomingBubble : colors.backgroundSecondary }]}>
-            <Ionicons name="keypad-outline" size={20} color={colors.textSecondary} style={styles.fieldIcon} />
+            <Ionicons name="lock-closed-outline" size={20} color={colors.textSecondary} style={styles.fieldIcon} />
             <TextInput
-              value={code}
-              onChangeText={setCode}
-              placeholder="Verification code"
+              value={password}
+              onChangeText={setPassword}
+              placeholder="Password"
               placeholderTextColor={colors.textSecondary}
-              keyboardType="number-pad"
               secureTextEntry
+              autoCapitalize="none"
               style={[styles.input, { color: colors.text }]}
               onSubmitEditing={submit}
             />
@@ -80,10 +85,6 @@ export default function LoginScreen() {
           >
             <Text style={styles.buttonText}>{busy ? 'Signing in…' : 'Sign in'}</Text>
           </Pressable>
-
-          <Text style={[styles.hint, { color: colors.textSecondary }]}>
-            Dev hint: use a seeded user (e.g. alice / 1234)
-          </Text>
 
           <View style={styles.registerRow}>
             <Text style={[styles.registerHint, { color: colors.textSecondary }]}>New here?</Text>
@@ -167,11 +168,6 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 16,
     fontWeight: '600',
-  },
-  hint: {
-    textAlign: 'center',
-    fontSize: 12,
-    marginTop: 14,
   },
   registerRow: {
     flexDirection: 'row',
