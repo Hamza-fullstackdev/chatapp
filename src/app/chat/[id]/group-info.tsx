@@ -16,6 +16,14 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useWaTheme } from '@/context/theme-context';
 import { useAuth } from '@/context/auth-context';
 import { conversationsApi, groupsApi, usersApi } from '@/lib/api';
+import { cacheDetail, cacheDirectoryUsers } from '@/lib/pull-sync';
+import { getDb } from '@/db/database';
+import {
+  getCachedDetail,
+  getStoredGroupDetail,
+  listAllUserProfiles,
+  updateConversationInfo,
+} from '@/db/repositories';
 import { Avatar } from '@/components/avatar';
 import type { ConversationDetailDTO, GroupDetailDTO, UserDTO } from '@/types/api';
 
@@ -46,6 +54,20 @@ export default function GroupInfoScreen() {
       setDetail(conv);
       setGroup(grp);
       setNameDraft(grp.name ?? '');
+      // Persist members + identities so group info renders offline later.
+      const db = await getDb();
+      await cacheDetail(conv);
+      await updateConversationInfo(db, groupId, { name: grp.name, avatarUrl: grp.avatarUrl });
+    } catch {
+      // Offline-first fallback: render from the local store.
+      const db = await getDb();
+      const cachedConv = await getCachedDetail(db, groupId);
+      const cachedGroup = await getStoredGroupDetail(db, groupId);
+      if (cachedConv) {
+        setDetail(cachedConv);
+        setNameDraft(cachedConv.conversation.name ?? groupId);
+      }
+      if (cachedGroup) setGroup(cachedGroup);
     } finally {
       setLoading(false);
     }
@@ -60,8 +82,19 @@ export default function GroupInfoScreen() {
   const openAddMembers = async () => {
     setAddOpen(true);
     const existing = new Set(detail?.members.map((m) => m.id) ?? []);
-    const { users } = await usersApi.list();
-    setCandidates(users.filter((u) => !existing.has(u.id)));
+    try {
+      const { users } = await usersApi.list();
+      await cacheDirectoryUsers(users);
+      setCandidates(users.filter((u) => !existing.has(u.id)));
+    } catch {
+      const db = await getDb();
+      const cached = await listAllUserProfiles(db);
+      setCandidates(
+        cached
+          .map((u) => ({ ...u, createdAt: '' }))
+          .filter((u) => !existing.has(u.id)),
+      );
+    }
   };
 
   const addMembers = async (ids: string[]) => {

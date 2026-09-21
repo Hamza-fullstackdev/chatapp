@@ -4,11 +4,20 @@ import {
   getSyncCursor,
   setMessageReactions,
   setSyncCursor,
+  touchUserProfile,
   updateConversationInfo,
   upsertConversation,
   upsertMessage,
+  refreshConversationFromMessage,
+  upsertUserProfile,
+  cacheUsers,
+  saveConversationMembers,
+  setConversationMeta,
 } from '@/db/repositories';
 import { syncApi } from '@/lib/api';
+import { prewarmMessageMedia } from '@/lib/media-cache';
+import { getActiveConversationId } from '@/lib/active-conversation';
+import { notifyLocalDb } from '@/lib/local-db-events';
 import type { SyncChange } from '@/types/api';
 
 /**
@@ -18,13 +27,13 @@ import type { SyncChange } from '@/types/api';
  * Returns the number of applied changes so callers can decide whether to
  * re-read cached screens.
  */
-export async function pullAndApply(): Promise<number> {
+export async function pullAndApply(currentUserId: string): Promise<number> {
   const db = await getDb();
   const cursor = await getSyncCursor(db);
   const { changes, cursor: nextCursor } = await syncApi.pull(cursor, 200);
 
   for (const change of changes) {
-    await applyChange(db, change);
+    await applyChange(db, change, currentUserId);
   }
 
   if (changes.length > 0) {
@@ -33,15 +42,26 @@ export async function pullAndApply(): Promise<number> {
   return changes.length;
 }
 
-async function applyChange(db: Awaited<ReturnType<typeof getDb>>, change: SyncChange): Promise<void> {
+async function applyChange(
+  db: Awaited<ReturnType<typeof getDb>>,
+  change: SyncChange,
+  currentUserId: string,
+): Promise<void> {
   const payload = change.payload as Record<string, unknown>;
   try {
     if (change.entityType === 'message') {
       switch (change.operation) {
         case 'insert':
-        case 'update':
-          await upsertMessage(db, normalizeMessagePayload(payload));
+        case 'update': {
+          const message = normalizeMessagePayload(payload);
+          await upsertMessage(db, message);
+          await refreshConversationFromMessage(db, message, {
+            currentUserId,
+            activeConversationId: getActiveConversationId(),
+          });
+          prewarmMessageMedia(message, currentUserId);
           break;
+        }
         case 'delete': {
           const id = String(payload.id ?? change.entityId);
           await deleteMessageRow(db, id);
@@ -64,6 +84,7 @@ async function applyChange(db: Awaited<ReturnType<typeof getDb>>, change: SyncCh
           }
         }
       }
+      notifyLocalDb();
       return;
     }
 
@@ -78,6 +99,7 @@ async function applyChange(db: Awaited<ReturnType<typeof getDb>>, change: SyncCh
           ? payload.avatarUrl
           : undefined;
       await updateConversationInfo(db, payload.conversationId, { name, avatarUrl });
+      notifyLocalDb();
       return;
     }
 
@@ -87,6 +109,7 @@ async function applyChange(db: Awaited<ReturnType<typeof getDb>>, change: SyncCh
         name: typeof payload.name === 'string' ? payload.name : undefined,
         avatarUrl: typeof payload.avatarUrl === 'string' ? payload.avatarUrl : undefined,
       });
+      notifyLocalDb();
       return;
     }
 
@@ -124,15 +147,53 @@ export async function refreshConversations(conversations: import('@/types/api').
   const db = await getDb();
   for (const c of conversations) {
     await upsertConversation(db, c);
+    if (c.otherUserId && c.otherUserName) {
+      await touchUserProfile(db, c.otherUserId, {
+        name: c.otherUserName,
+        avatarUrl: c.otherUserAvatarUrl,
+      });
+    }
   }
+}
+
+/** Cache a directory/contact user list so searches render offline. */
+export async function cacheDirectoryUsers(users: import('@/types/api').UserDTO[]): Promise<void> {
+  const db = await getDb();
+  await cacheUsers(db, users);
+  notifyLocalDb();
 }
 
 /** Rebuild a conversation cache row from a freshly fetched detail. */
 export async function cacheDetail(detail: import('@/types/api').ConversationDetailDTO): Promise<void> {
   const db = await getDb();
   await upsertConversation(db, detail.conversation);
+  await saveConversationMembers(
+    db,
+    detail.conversation.id,
+    detail.members.map((m) => ({
+      id: m.id,
+      name: m.name,
+      username: m.username,
+      avatarUrl: m.avatarUrl,
+      role: m.role,
+      lastSeenAt: null,
+    })),
+  );
+  if (detail.conversation.type === 'group' && detail.members.length > 0) {
+    await setConversationMeta(db, detail.conversation.id, { memberCount: detail.members.length });
+  }
+  for (const member of detail.members) {
+    await upsertUserProfile(db, {
+      id: member.id,
+      name: member.name,
+      username: member.username,
+      avatarUrl: member.avatarUrl,
+      lastSeenAt: null,
+    });
+  }
   for (const m of detail.messages) {
     await upsertMessage(db, m);
+    await touchUserProfile(db, m.senderId);
   }
 }
 

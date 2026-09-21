@@ -1,5 +1,14 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
-import type { AttachmentDTO, ConversationDTO, MessageDTO, ReactionDTO } from '@/types/api';
+import type {
+  AttachmentDTO,
+  CallDTO,
+  ConversationDTO,
+  ConversationDetailDTO,
+  GroupDetailDTO,
+  MessageDTO,
+  ReactionDTO,
+  UserDTO,
+} from '@/types/api';
 
 // ---------------------------------------------------------------------------
 // Key-value metadata (sync cursor, flags)
@@ -54,6 +63,7 @@ type ConversationRow = {
   last_message_status: string | null;
   last_message_has_attachments: number;
   unread_count: number;
+  last_read_message_id: string | null;
   updated_at: string | null;
   member_count: number;
   is_group_admin: number;
@@ -138,9 +148,61 @@ export async function deleteMessagesLocal(db: SQLiteDatabase, ids: string[]): Pr
   await db.runAsync(`DELETE FROM messages WHERE id IN (${placeholders})`, ...ids);
 }
 
-export async function listConversations(db: SQLiteDatabase): Promise<ConversationDTO[]> {
+/**
+ * True unread count for a conversation: every incoming message newer than the
+ * local read marker — or every incoming message when the user has never read
+ * it. This is derived from the messages table rather than an incremented
+ * counter, so duplicate deliveries of the same message (socket + pull, or the
+ * insert/delivered changelog pair the server writes per message) can never
+ * inflate the badge.
+ */
+async function computeUnreadCount(
+  db: SQLiteDatabase,
+  conversationId: string,
+  currentUserId: string,
+): Promise<number> {
+  const row = await db.getFirstAsync<{ n: number }>(
+    `SELECT COUNT(*) AS n
+     FROM messages m
+     WHERE m.conversation_id = ?
+       AND m.sender_id <> ?
+       AND (
+         (SELECT last_read_message_id FROM conversations WHERE id = ?) IS NULL
+         OR m.created_at > (
+           SELECT created_at FROM messages WHERE id =
+             (SELECT last_read_message_id FROM conversations WHERE id = ?)
+         )
+       )`,
+    conversationId,
+    currentUserId,
+    conversationId,
+    conversationId,
+  );
+  return row?.n ?? 0;
+}
+
+export async function listConversations(db: SQLiteDatabase, currentUserId: string): Promise<ConversationDTO[]> {
   const rows = await db.getAllAsync<ConversationRow>(
-    `SELECT * FROM conversations ORDER BY COALESCE(updated_at, last_message_created_at, '') DESC`,
+    `SELECT
+      c.id, c.type, c.name, c.avatar_url, c.other_user_id, c.other_user_name,
+      c.other_user_avatar_url, c.last_message_id, c.last_message_type,
+      c.last_message_text, c.last_message_sender_id, c.last_message_created_at,
+      c.last_message_status, c.last_message_has_attachments, c.updated_at,
+      c.member_count, c.is_group_admin,
+      (
+        SELECT COUNT(*) FROM messages m
+        WHERE m.conversation_id = c.id
+          AND m.sender_id <> ?
+          AND (
+            c.last_read_message_id IS NULL
+            OR m.created_at > (
+              SELECT created_at FROM messages WHERE id = c.last_read_message_id
+            )
+          )
+      ) AS unread_count
+     FROM conversations c
+     ORDER BY COALESCE(c.updated_at, c.last_message_created_at, '') DESC`,
+    currentUserId,
   );
   return rows.map(rowToConversation);
 }
@@ -167,11 +229,117 @@ export async function setConversationMeta(
 }
 
 export async function markConversationRead(db: SQLiteDatabase, id: string): Promise<void> {
-  await db.runAsync('UPDATE conversations SET unread_count = 0 WHERE id = ?', id);
+  await db.runAsync(
+    `UPDATE conversations
+     SET unread_count = 0,
+         last_read_message_id = (
+           SELECT id FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 1
+         )
+     WHERE id = ?`,
+    id,
+    id,
+  );
 }
 
 export async function deleteConversation(db: SQLiteDatabase, id: string): Promise<void> {
   await db.runAsync('DELETE FROM conversations WHERE id = ?', id);
+}
+
+// ---------------------------------------------------------------------------
+// Conversation members (offline group / member rendering)
+// ---------------------------------------------------------------------------
+
+export type StoredMember = {
+  id: string;
+  name: string;
+  username: string;
+  avatarUrl: string | null;
+  role: string;
+  lastSeenAt: string | null;
+};
+
+export async function saveConversationMembers(
+  db: SQLiteDatabase,
+  conversationId: string,
+  members: StoredMember[],
+): Promise<void> {
+  await db.runAsync('DELETE FROM conversation_members WHERE conversation_id = ?', conversationId);
+  for (const m of members) {
+    await db.runAsync(
+      `INSERT OR REPLACE INTO conversation_members
+        (conversation_id, user_id, name, username, avatar_url, role, last_seen_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      conversationId,
+      m.id,
+      m.name,
+      m.username,
+      m.avatarUrl,
+      m.role,
+      m.lastSeenAt ?? null,
+    );
+  }
+}
+
+export async function listConversationMembers(
+  db: SQLiteDatabase,
+  conversationId: string,
+): Promise<StoredMember[]> {
+  const rows = await db.getAllAsync<{
+    conversation_id: string;
+    user_id: string;
+    name: string | null;
+    username: string | null;
+    avatar_url: string | null;
+    role: string | null;
+    last_seen_at: string | null;
+  }>(
+    'SELECT * FROM conversation_members WHERE conversation_id = ? ORDER BY name COLLATE NOCASE ASC',
+    conversationId,
+  );
+  return rows.map((r) => ({
+    id: r.user_id,
+    name: r.name ?? '',
+    username: r.username ?? '',
+    avatarUrl: r.avatar_url,
+    role: r.role ?? 'member',
+    lastSeenAt: r.last_seen_at,
+  }));
+}
+
+/**
+ * Rebuild a ConversationDetailDTO from the local store (members + conversation
+ * row) so group info and header details render offline.
+ */
+export async function getCachedDetail(
+  db: SQLiteDatabase,
+  conversationId: string,
+): Promise<ConversationDetailDTO | null> {
+  const conversation = await getConversation(db, conversationId);
+  if (!conversation) return null;
+  const members = await listConversationMembers(db, conversationId);
+  return { conversation, members, messages: [] };
+}
+
+/** Rebuild a GroupDetailDTO from the local store (name, admins, myRole). */
+export async function getStoredGroupDetail(
+  db: SQLiteDatabase,
+  conversationId: string,
+): Promise<GroupDetailDTO | null> {
+  const row = await db.getFirstAsync<ConversationRow>(
+    "SELECT * FROM conversations WHERE id = ? AND type = 'group'",
+    conversationId,
+  );
+  if (!row) return null;
+  const members = await listConversationMembers(db, conversationId);
+  return {
+    conversationId,
+    name: row.name ?? 'Group',
+    description: null,
+    avatarUrl: row.avatar_url,
+    memberIds: members.map((m) => m.id),
+    admins: members.filter((m) => m.role === 'admin').map((m) => m.id),
+    myRole: row.is_group_admin === 1 ? 'admin' : 'member',
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -490,4 +658,525 @@ export async function truncatePendingOps(db: SQLiteDatabase): Promise<void> {
 export async function countPendingOps(db: SQLiteDatabase): Promise<number> {
   const row = await db.getFirstAsync<{ n: number }>('SELECT COUNT(*) AS n FROM pending_ops');
   return row?.n ?? 0;
+}
+
+// ---------------------------------------------------------------------------
+// Media cache (offline attachment bytes on disk, mirrored in SQLite)
+// ---------------------------------------------------------------------------
+
+export interface MediaCacheEntry {
+  storageKey: string;
+  attachmentId: string;
+  messageId: string | null;
+  conversationId: string | null;
+  storagePath: string | null;
+  mimeType: string | null;
+  size: number;
+  localUri: string;
+  downloadedAt: string;
+  savedToPhotos: boolean;
+}
+
+type MediaCacheRow = {
+  storage_key: string;
+  attachment_id: string;
+  message_id: string | null;
+  conversation_id: string | null;
+  storage_path: string | null;
+  mime_type: string | null;
+  size: number;
+  local_uri: string;
+  downloaded_at: string;
+  saved_to_photos: number;
+};
+
+function rowToMediaCache(row: MediaCacheRow): MediaCacheEntry {
+  return {
+    storageKey: row.storage_key,
+    attachmentId: row.attachment_id,
+    messageId: row.message_id,
+    conversationId: row.conversation_id,
+    storagePath: row.storage_path,
+    mimeType: row.mime_type,
+    size: row.size,
+    localUri: row.local_uri,
+    downloadedAt: row.downloaded_at,
+    savedToPhotos: row.saved_to_photos === 1,
+  };
+}
+
+export async function upsertCachedMedia(db: SQLiteDatabase, entry: MediaCacheEntry): Promise<void> {
+  await db.runAsync(
+    `INSERT INTO media_cache (
+      storage_key, attachment_id, message_id, conversation_id, storage_path,
+      mime_type, size, local_uri, downloaded_at, saved_to_photos
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(storage_key) DO UPDATE SET
+      attachment_id = excluded.attachment_id,
+      message_id = excluded.message_id,
+      conversation_id = excluded.conversation_id,
+      storage_path = excluded.storage_path,
+      mime_type = excluded.mime_type,
+      size = excluded.size,
+      local_uri = excluded.local_uri,
+      downloaded_at = excluded.downloaded_at,
+      saved_to_photos = media_cache.saved_to_photos OR excluded.saved_to_photos`,
+    entry.storageKey,
+    entry.attachmentId,
+    entry.messageId,
+    entry.conversationId,
+    entry.storagePath,
+    entry.mimeType,
+    entry.size,
+    entry.localUri,
+    entry.downloadedAt,
+    entry.savedToPhotos ? 1 : 0,
+  );
+}
+
+/** Marks a cached file as exported to the device photo library (idempotent). */
+export async function markMediaSavedToPhotos(db: SQLiteDatabase, storageKey: string): Promise<void> {
+  await db.runAsync('UPDATE media_cache SET saved_to_photos = 1 WHERE storage_key = ?', storageKey);
+}
+
+export async function getCachedMedia(db: SQLiteDatabase, storageKey: string): Promise<MediaCacheEntry | null> {
+  const row = await db.getFirstAsync<MediaCacheRow>(
+    'SELECT * FROM media_cache WHERE storage_key = ?',
+    storageKey,
+  );
+  return row ? rowToMediaCache(row) : null;
+}
+
+export async function getCachedMediaForAttachment(db: SQLiteDatabase, attachmentId: string): Promise<MediaCacheEntry | null> {
+  const row = await db.getFirstAsync<MediaCacheRow>(
+    'SELECT * FROM media_cache WHERE attachment_id = ? ORDER BY downloaded_at DESC LIMIT 1',
+    attachmentId,
+  );
+  return row ? rowToMediaCache(row) : null;
+}
+
+export async function listCachedMedia(db: SQLiteDatabase): Promise<MediaCacheEntry[]> {
+  const rows = await db.getAllAsync<MediaCacheRow>('SELECT * FROM media_cache ORDER BY downloaded_at DESC');
+  return rows.map(rowToMediaCache);
+}
+
+export async function removeCachedMedia(db: SQLiteDatabase, storageKey: string): Promise<void> {
+  await db.runAsync('DELETE FROM media_cache WHERE storage_key = ?', storageKey);
+}
+
+export async function removeCachedMediaByKeys(db: SQLiteDatabase, storageKeys: string[]): Promise<void> {
+  if (storageKeys.length === 0) return;
+  const placeholders = storageKeys.map(() => '?').join(', ');
+  await db.runAsync(`DELETE FROM media_cache WHERE storage_key IN (${placeholders})`, ...storageKeys);
+}
+
+export async function clearMediaCacheTable(db: SQLiteDatabase): Promise<void> {
+  await db.runAsync('DELETE FROM media_cache');
+}
+
+export async function mediaCacheSize(db: SQLiteDatabase): Promise<number> {
+  const row = await db.getFirstAsync<{ n: number }>('SELECT COALESCE(SUM(size), 0) AS n FROM media_cache');
+  return row?.n ?? 0;
+}
+
+// ---------------------------------------------------------------------------
+// User profiles (offline identity cache for senders / peers / group members)
+// ---------------------------------------------------------------------------
+
+type UserProfileRow = {
+  id: string;
+  name: string | null;
+  username: string | null;
+  email: string | null;
+  phone: string | null;
+  bio: string | null;
+  avatar_url: string | null;
+  last_seen_at: string | null;
+  updated_at: string;
+};
+
+export type StoredProfile = Pick<
+  UserDTO,
+  'id' | 'name' | 'username' | 'email' | 'phone' | 'bio' | 'avatarUrl' | 'lastSeenAt'
+>;
+
+function rowToProfile(row: UserProfileRow): StoredProfile {
+  return {
+    id: row.id,
+    name: row.name ?? '',
+    username: row.username ?? '',
+    email: row.email,
+    phone: row.phone,
+    bio: row.bio,
+    avatarUrl: row.avatar_url,
+    lastSeenAt: row.last_seen_at,
+  };
+}
+
+export async function upsertUserProfile(
+  db: SQLiteDatabase,
+  profile: Partial<StoredProfile> & Pick<UserDTO, 'id'>,
+): Promise<void> {
+  await db.runAsync(
+    `INSERT INTO user_profiles (id, name, username, email, phone, bio, avatar_url, last_seen_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       name = COALESCE(excluded.name, name),
+       username = COALESCE(excluded.username, username),
+       email = COALESCE(excluded.email, email),
+       phone = COALESCE(excluded.phone, phone),
+       bio = COALESCE(excluded.bio, bio),
+       avatar_url = COALESCE(excluded.avatar_url, avatar_url),
+       last_seen_at = COALESCE(excluded.last_seen_at, last_seen_at),
+       updated_at = excluded.updated_at`,
+    profile.id,
+    profile.name !== undefined ? profile.name : null,
+    profile.username !== undefined ? profile.username : null,
+    profile.email !== undefined ? profile.email : null,
+    profile.phone !== undefined ? profile.phone : null,
+    profile.bio !== undefined ? profile.bio : null,
+    profile.avatarUrl !== undefined ? profile.avatarUrl : null,
+    profile.lastSeenAt !== undefined ? profile.lastSeenAt : null,
+    new Date().toISOString(),
+  );
+}
+
+/**
+ * Bulk-cache a full user list (e.g. contacts / directory responses) so the
+ * Contacts tab and group member picker can render offline.
+ */
+export async function cacheUsers(db: SQLiteDatabase, users: UserDTO[]): Promise<void> {
+  for (const u of users) {
+    await upsertUserProfile(db, {
+      id: u.id,
+      name: u.name,
+      username: u.username,
+      email: u.email,
+      phone: u.phone,
+      bio: u.bio,
+      avatarUrl: u.avatarUrl,
+      lastSeenAt: u.lastSeenAt,
+    });
+  }
+}
+
+/**
+ * Remember that a user was seen (message sender, presence update, peer) so an
+ * offline lookup at least knows the id exists. Names/avatars are filled in
+ * whenever a full profile is observed.
+ */
+export async function touchUserProfile(
+  db: SQLiteDatabase,
+  id: string,
+  partial?: Partial<Pick<UserDTO, 'name' | 'username' | 'email' | 'phone' | 'bio' | 'avatarUrl' | 'lastSeenAt'>>,
+): Promise<void> {
+  if (!id) return;
+  await db.runAsync(
+    `INSERT INTO user_profiles (id, name, username, email, phone, bio, avatar_url, last_seen_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       name = COALESCE(excluded.name, name),
+       username = COALESCE(excluded.username, username),
+       email = COALESCE(excluded.email, email),
+       phone = COALESCE(excluded.phone, phone),
+       bio = COALESCE(excluded.bio, bio),
+       avatar_url = COALESCE(excluded.avatar_url, avatar_url),
+       last_seen_at = COALESCE(excluded.last_seen_at, last_seen_at),
+       updated_at = excluded.updated_at`,
+    id,
+    partial?.name ?? null,
+    partial?.username ?? null,
+    partial?.email ?? null,
+    partial?.phone ?? null,
+    partial?.bio ?? null,
+    partial?.avatarUrl ?? null,
+    partial?.lastSeenAt ?? null,
+    new Date().toISOString(),
+  );
+}
+
+export async function getUserProfile(db: SQLiteDatabase, id: string): Promise<StoredProfile | null> {
+  const row = await db.getFirstAsync<UserProfileRow>('SELECT * FROM user_profiles WHERE id = ?', id);
+  return row ? rowToProfile(row) : null;
+}
+
+export async function listUserProfiles(
+  db: SQLiteDatabase,
+  ids: string[],
+): Promise<Map<string, StoredProfile>> {
+  if (ids.length === 0) return new Map();
+  const placeholders = ids.map(() => '?').join(', ');
+  const rows = await db.getAllAsync<UserProfileRow>(
+    `SELECT * FROM user_profiles WHERE id IN (${placeholders})`,
+    ...ids,
+  );
+  const out = new Map<string, StoredProfile>();
+  for (const row of rows) out.set(row.id, rowToProfile(row));
+  return out;
+}
+
+/**
+ * All known user profiles, optionally name-filtered. This is the offline
+ * directory for the Contacts tab and group member picker.
+ */
+export async function listAllUserProfiles(
+  db: SQLiteDatabase,
+  search?: string,
+): Promise<StoredProfile[]> {
+  const q = search?.trim();
+  const rows = q
+    ? await db.getAllAsync<UserProfileRow>(
+        `SELECT * FROM user_profiles
+         WHERE name LIKE ? OR username LIKE ?
+         ORDER BY name COLLATE NOCASE ASC`,
+        `%${q}%`,
+        `%${q}%`,
+      )
+    : await db.getAllAsync<UserProfileRow>(
+        'SELECT * FROM user_profiles ORDER BY name COLLATE NOCASE ASC',
+      );
+  return rows.map(rowToProfile);
+}
+
+// ---------------------------------------------------------------------------
+// Calls (offline call history)
+// ---------------------------------------------------------------------------
+
+type CallRow = {
+  id: string;
+  conversation_id: string | null;
+  caller_id: string;
+  callee_id: string;
+  call_type: string;
+  status: string;
+  started_at: string | null;
+  answered_at: string | null;
+  ended_at: string | null;
+  created_at: string;
+  peer_id: string;
+  peer_name: string | null;
+  peer_avatar_url: string | null;
+  is_outgoing: number;
+};
+
+function rowToCall(row: CallRow): CallDTO {
+  return {
+    id: row.id,
+    conversationId: row.conversation_id,
+    callerId: row.caller_id,
+    calleeId: row.callee_id,
+    callType: row.call_type,
+    status: row.status as CallDTO['status'],
+    startedAt: row.started_at,
+    answeredAt: row.answered_at,
+    endedAt: row.ended_at,
+    createdAt: row.created_at,
+    peerId: row.peer_id,
+    peerName: row.peer_name,
+    peerAvatarUrl: row.peer_avatar_url,
+    isOutgoing: row.is_outgoing === 1,
+    online: false,
+  };
+}
+
+export async function upsertCall(db: SQLiteDatabase, call: CallDTO): Promise<void> {
+  await db.runAsync(
+    `INSERT INTO calls (
+      id, conversation_id, caller_id, callee_id, call_type, status, started_at,
+      answered_at, ended_at, created_at, peer_id, peer_name, peer_avatar_url, is_outgoing
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      status = excluded.status,
+      started_at = excluded.started_at,
+      answered_at = excluded.answered_at,
+      ended_at = excluded.ended_at,
+      peer_name = excluded.peer_name,
+      peer_avatar_url = excluded.peer_avatar_url`,
+    call.id,
+    call.conversationId,
+    call.callerId,
+    call.calleeId,
+    call.callType,
+    call.status,
+    call.startedAt,
+    call.answeredAt,
+    call.endedAt,
+    call.createdAt,
+    call.peerId,
+    call.peerName,
+    call.peerAvatarUrl,
+    call.isOutgoing ? 1 : 0,
+  );
+}
+
+export async function listCalls(db: SQLiteDatabase, limit = 100): Promise<CallDTO[]> {
+  const rows = await db.getAllAsync<CallRow>(
+    'SELECT * FROM calls ORDER BY created_at DESC LIMIT ?',
+    limit,
+  );
+  return rows.map(rowToCall);
+}
+
+export async function deleteCallsLocal(db: SQLiteDatabase, ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const placeholders = ids.map(() => '?').join(', ');
+  await db.runAsync(`DELETE FROM calls WHERE id IN (${placeholders})`, ...ids);
+}
+
+export async function clearCallsLocal(db: SQLiteDatabase): Promise<void> {
+  await db.runAsync('DELETE FROM calls');
+}
+
+// ---------------------------------------------------------------------------
+// Conversation cache refresh from a live message (socket / pull-sync)
+// ---------------------------------------------------------------------------
+
+function lastMessageFromMessage(message: MessageDTO) {
+  return {
+    id: message.id,
+    type: message.type,
+    text: message.text,
+    senderId: message.senderId,
+    status: message.status,
+    createdAt: message.createdAt,
+    hasAttachments: message.hasAttachments,
+  };
+}
+
+/**
+ * Keep the `conversations` cache row consistent with an incoming/outgoing
+ * message that just arrived via socket or pull-sync. The row is created if it
+ * does not exist yet (offline-first: a chat you have never opened still
+ * appears in the Chats tab), its last-message preview is advanced only when
+ * the new message is newer, and unread is **recomputed** from the messages
+ * table against the local read marker — never incremented — so reapplying the
+ * same message (socket + pull, insert/delivered changelog pairs) is
+ * idempotent and can never double the badge.
+ */
+export async function refreshConversationFromMessage(
+  db: SQLiteDatabase,
+  message: MessageDTO,
+  opts: { currentUserId: string; activeConversationId: string | null },
+): Promise<void> {
+  const existing = await db.getFirstAsync<ConversationRow>(
+    'SELECT * FROM conversations WHERE id = ?',
+    message.conversationId,
+  );
+
+  const last = lastMessageFromMessage(message);
+  const incoming = message.senderId !== opts.currentUserId;
+  const isActive = opts.activeConversationId === message.conversationId;
+
+  // The chat is on screen: anything arriving is seen immediately, so roll the
+  // local read marker forward and let the recompute report zero unread.
+  if (existing && isActive) {
+    await db.runAsync(
+      `UPDATE conversations
+       SET last_read_message_id = (
+         SELECT id FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 1
+       )
+       WHERE id = ?`,
+      message.conversationId,
+      message.conversationId,
+    );
+  }
+
+  const unread = await computeUnreadCount(db, message.conversationId, opts.currentUserId);
+
+  if (!existing) {
+    await db.runAsync(
+      `INSERT INTO conversations (
+        id, type, name, other_user_id, other_user_name, last_message_id,
+        last_message_type, last_message_text, last_message_sender_id,
+        last_message_status, last_message_created_at, last_message_has_attachments,
+        unread_count, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      message.conversationId,
+      'private',
+      null,
+      incoming ? message.senderId : null,
+      null,
+      last.id,
+      last.type,
+      last.text,
+      last.senderId,
+      last.status,
+      last.createdAt,
+      last.hasAttachments ? 1 : 0,
+      unread,
+      message.createdAt,
+    );
+    return;
+  }
+
+  const currentLastAt = existing.last_message_created_at;
+  const isNewer = !currentLastAt || message.createdAt > currentLastAt;
+  const updates: string[] = [];
+  const params: (string | number | null)[] = [];
+
+  if (isNewer) {
+    updates.push(
+      'last_message_id = ?',
+      'last_message_type = ?',
+      'last_message_text = ?',
+      'last_message_sender_id = ?',
+      'last_message_status = ?',
+      'last_message_created_at = ?',
+      'last_message_has_attachments = ?',
+    );
+    params.push(last.id, last.type, last.text, last.senderId, last.status, last.createdAt, last.hasAttachments ? 1 : 0);
+  }
+
+  updates.push('updated_at = ?');
+  params.push(message.createdAt > (currentLastAt ?? '') ? message.createdAt : new Date().toISOString());
+
+  updates.push('unread_count = ?');
+  params.push(unread);
+
+  await db.runAsync(
+    `UPDATE conversations SET ${updates.join(', ')} WHERE id = ?`,
+    ...params,
+    message.conversationId,
+  );
+}
+
+/**
+ * Upgrade the cached last-message delivery status (sent → delivered → read)
+ * so the Chats tab ticks reflect reality without a network round-trip.
+ */
+export async function markConversationLastMessageStatus(
+  db: SQLiteDatabase,
+  conversationId: string,
+  messageId: string,
+  status: string,
+): Promise<void> {
+  await db.runAsync(
+    `UPDATE conversations
+     SET last_message_status = ?
+     WHERE id = ? AND last_message_id = ?`,
+    status,
+    conversationId,
+    messageId,
+  );
+}
+
+/** Drop the cached last-message preview when that exact message was deleted. */
+export async function clearConversationLastMessageIfMatch(
+  db: SQLiteDatabase,
+  conversationId: string,
+  messageId: string,
+): Promise<void> {
+  await db.runAsync(
+    `UPDATE conversations
+     SET last_message_id = NULL,
+         last_message_type = NULL,
+         last_message_text = NULL,
+         last_message_sender_id = NULL,
+         last_message_status = NULL,
+         last_message_created_at = NULL,
+         last_message_has_attachments = 0
+     WHERE id = ? AND last_message_id = ?`,
+    conversationId,
+    messageId,
+  );
 }

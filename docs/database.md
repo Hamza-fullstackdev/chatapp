@@ -126,7 +126,7 @@ PostgreSQL:
 
 ```bash
 npm run db:migrate   # applies every unapplied database/postgres/migrations/*.sql in order
-npm run db:reset     # destructive: drop, migrate, seed
+npm run db:reset     # destructive: drop schema (run db:migrate afterwards for an empty DB)
 npm run db:schema    # regenerate database/postgres/schema.sql (consolidated view)
 ```
 
@@ -138,14 +138,3 @@ npm run db:schema    # regenerate database/postgres/schema.sql (consolidated vie
 SQLite: migrations are embedded in the app and applied with `PRAGMA user_version` at first open
 (`app/src/db/database.ts`). Bump the version and append a migration string to change the device
 schema.
-
-## Seed process
-
-```bash
-npm run db:seed
-```
-
-- Seed SQL lives in `api/database/postgres/seeds/` and SQLite seeds in `api/database/sqlite/seeds/`.
-- Seed data is **development/demo data only** and is clearly marked as such.
-- Seeded users with passwords use the same hashing mechanism as the backend (bcrypt) — never
-  plaintext. No real credentials or production secrets are ever seeded.

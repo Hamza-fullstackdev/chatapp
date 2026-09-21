@@ -63,6 +63,14 @@
       ],
       "expo-document-picker",
       [
+        "expo-media-library",
+        {
+          "photosPermission": "Allow $(PRODUCT_NAME) to access your photos to view and hear saved media.",
+          "savePhotosPermission": "Allow $(PRODUCT_NAME) to save downloaded media to your photo library.",
+          "isAccessMediaLocationEnabled": false
+        }
+      ],
+      [
         "@config-plugins/react-native-webrtc",
         {
           "cameraPermission": "Allow $(PRODUCT_NAME) to use your camera for video calls.",

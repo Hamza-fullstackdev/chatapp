@@ -91,6 +91,26 @@ function toCandidate(payload: unknown): RTCIceCandidate {
 }
 
 /**
+ * ICE candidates cannot be added before a remote description exists; any that
+ * overtake the offer/answer are buffered per connection and flushed the moment
+ * the remote description lands (candidate order is preserved).
+ */
+const pendingIce = new WeakMap<RTCPeerConnection, RTCIceCandidate[]>();
+
+async function flushPendingIce(pc: RTCPeerConnection): Promise<void> {
+  const buffered = pendingIce.get(pc);
+  if (!buffered) return;
+  pendingIce.delete(pc);
+  for (const candidate of buffered) {
+    try {
+      await pc.addIceCandidate(candidate);
+    } catch {
+      // Candidate turned stale while buffered — safe to ignore.
+    }
+  }
+}
+
+/**
  * Apply a relayed signal. Returns an outbound packet when the peer must answer.
  */
 export async function handleIncomingSignal(
@@ -101,15 +121,25 @@ export async function handleIncomingSignal(
     await pc.setRemoteDescription(toDescription(signal.data));
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
+    await flushPendingIce(pc);
     return { type: 'answer', data: pc.localDescription?.toJSON() };
   }
   if (signal.type === 'answer') {
     await pc.setRemoteDescription(toDescription(signal.data));
+    await flushPendingIce(pc);
     return null;
   }
   if (signal.type === 'ice') {
+    const candidate = toCandidate(signal.data);
+    if (!pc.remoteDescription) {
+      // Offer/answer has not been applied yet — queue it instead of losing it.
+      const buffered = pendingIce.get(pc) ?? [];
+      buffered.push(candidate);
+      pendingIce.set(pc, buffered);
+      return null;
+    }
     try {
-      await pc.addIceCandidate(toCandidate(signal.data));
+      await pc.addIceCandidate(candidate);
     } catch {
       // Candidate arrived after the connection stabilized — safe to ignore.
     }
@@ -118,8 +148,18 @@ export async function handleIncomingSignal(
   return null;
 }
 
+/**
+ * Create (or re-announce) the local offer. The retry loop in the call screen
+ * calls this repeatedly until the peer answers; re-emitting the existing offer
+ * lets the callee recover a copy that arrived before its peer connection was
+ * ready, instead of the offer being lost forever.
+ */
 export async function sendOffer(pc: RTCPeerConnection, onSignal: (packet: OutboundSignal) => void) {
-  if (pc.remoteDescription || (pc.localDescription && pc.localDescription.type === 'offer')) {
+  if (pc.remoteDescription) {
+    return;
+  }
+  if (pc.localDescription && pc.localDescription.type === 'offer') {
+    onSignal({ type: 'offer', data: pc.localDescription.toJSON() });
     return;
   }
   const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });

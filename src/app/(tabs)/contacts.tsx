@@ -117,7 +117,7 @@ export default function ContactsScreen() {
         <View style={styles.center}>
           <ActivityIndicator size="large" color={colors.brand} />
         </View>
-      ) : error ? (
+      ) : error && users == null ? (
         <View style={styles.center}>
           <Text style={[styles.errorText, { color: colors.text }]}>Couldn&apos;t load contacts</Text>
           <Text style={[styles.errorDetail, { color: colors.textSecondary }]}>{error}</Text>

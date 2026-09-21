@@ -29,7 +29,6 @@ cd api
 cp .env.example .env      # fill in Supabase + JWT values
 npm install
 npm run db:migrate        # apply database/postgres/migrations/*.sql
-npm run db:seed           # development/demo data (clearly marked)
 npm run dev               # http://localhost:5000
 ```
 
@@ -37,8 +36,7 @@ Useful scripts:
 
 ```bash
 npm run db:migrate        # apply PostgreSQL migrations
-npm run db:seed           # seed demo data
-npm run db:reset          # drop + recreate + migrate + seed
+npm run db:reset          # drop + recreate (empty) schema
 npm run db:schema         # regenerate database/postgres/schema.sql from migrations
 npm run storage:setup     # create the Supabase Storage bucket + policies
 npm run typecheck         # tsc --noEmit

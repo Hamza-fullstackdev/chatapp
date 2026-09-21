@@ -14,6 +14,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Image } from 'expo-image';
 import { useWaTheme } from '@/context/theme-context';
 import { conversationsApi, usersApi } from '@/lib/api';
+import { getDb } from '@/db/database';
+import { getUserProfile, upsertUserProfile } from '@/db/repositories';
 import { Avatar } from '@/components/avatar';
 import { formatLastSeen } from '@/lib/format';
 import type { UserDTO } from '@/types/api';
@@ -32,13 +34,31 @@ export default function UserProfileScreen() {
   useEffect(() => {
     let active = true;
     (async () => {
+      // Offline-first: render the cached profile instantly, then refresh.
+      const db = await getDb();
+      const cached = await getUserProfile(db, userId);
+      if (!active) return;
+      if (cached) {
+        setProfile({ ...cached, createdAt: '' });
+        setLoading(false);
+      }
       try {
         const loaded = await usersApi.get(userId);
         if (!active) return;
         setProfile(loaded);
         setLoading(false);
+        await upsertUserProfile(db, {
+          id: loaded.id,
+          name: loaded.name,
+          username: loaded.username,
+          email: loaded.email,
+          phone: loaded.phone,
+          bio: loaded.bio,
+          avatarUrl: loaded.avatarUrl,
+          lastSeenAt: loaded.lastSeenAt,
+        });
       } catch (e) {
-        if (active) {
+        if (active && !cached) {
           setLoading(false);
           setError(e instanceof Error ? e.message : 'Could not load profile');
         }

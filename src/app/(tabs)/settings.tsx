@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Alert, KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useEffect, useState } from 'react';
+import { Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '@/context/auth-context';
 import { useWaTheme } from '@/context/theme-context';
@@ -7,7 +7,16 @@ import { Avatar } from '@/components/avatar';
 import { formatLastSeen } from '@/lib/format';
 import { authApi } from '@/lib/api';
 import { pickAvatarImage, uploadAvatar, type LocalUploadSource } from '@/lib/media';
-import { resetDatabase } from '@/db/database';
+import { clearMediaCache, getMediaCacheStats } from '@/lib/media-cache';
+import { useLocalDb } from '@/lib/local-db-events';
+import { purgeDatabase } from '@/db/database';
+
+function formatBytes(bytes: number): string {
+  if (bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  return `${(bytes / 1024 ** i).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
 
 export default function SettingsScreen() {
   const { user, signOut, updateUser } = useAuth();
@@ -20,6 +29,35 @@ export default function SettingsScreen() {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleteText, setDeleteText] = useState('');
   const [deleting, setDeleting] = useState(false);
+
+  const [mediaStats, setMediaStats] = useState<{ entries: number; bytes: number }>({ entries: 0, bytes: 0 });
+
+  const reloadMediaStats = async () => {
+    setMediaStats(await getMediaCacheStats().catch(() => ({ entries: 0, bytes: 0 })));
+  };
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void reloadMediaStats();
+  }, []);
+
+  useLocalDb(() => {
+    void reloadMediaStats();
+  });
+
+  const confirmClearMedia = () => {
+    Alert.alert('Clear downloaded media', 'Delete media saved on this device?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Clear',
+        style: 'destructive',
+        onPress: () =>
+          void clearMediaCache()
+            .then(() => void reloadMediaStats())
+            .catch(() => undefined),
+      },
+    ]);
+  };
 
   if (!user) return null;
 
@@ -69,12 +107,18 @@ export default function SettingsScreen() {
       Alert.alert('Delete failed', e instanceof Error ? e.message : 'Could not delete your account');
       return;
     }
-    await resetDatabase().catch(() => undefined);
+    // Sign out first (disconnects the old user's socket, so nothing can write
+    // into the DB mid-wipe), then delete downloaded media files plus every
+    // SQLite table (chats, conversations, messages, attachments, contacts,
+    // call history, pending sync queue, profiles, cached media).
     await signOut();
+    await clearMediaCache().catch(() => undefined);
+    await purgeDatabase().catch(() => undefined);
   };
 
   return (
     <View style={[styles.safe, { backgroundColor: colors.background }]}>
+      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
       <View style={[styles.profile, { backgroundColor: colors.brandDark }]}>
         <Avatar name={user.name} uri={user.avatarUrl} size={84} />
         <Text style={styles.name}>{user.name}</Text>
@@ -119,6 +163,33 @@ export default function SettingsScreen() {
         <Text style={styles.logoutText}>Sign out</Text>
       </Pressable>
 
+      <View style={styles.storageWrap}>
+        <View style={[styles.item, { backgroundColor: colors.backgroundSecondary }]}>
+          <Ionicons name="download-outline" size={20} color={colors.brand} />
+          <Text style={[styles.itemLabel, { color: colors.text }]}>Media</Text>
+          <Text style={[styles.itemValue, { color: colors.textSecondary }]} numberOfLines={1}>
+            {mediaStats.entries > 0
+              ? `${formatBytes(mediaStats.bytes)} · ${mediaStats.entries} item${mediaStats.entries === 1 ? '' : 's'}`
+              : 'Nothing saved yet'}
+          </Text>
+        </View>
+        <Pressable
+          onPress={confirmClearMedia}
+          disabled={mediaStats.entries === 0}
+          style={({ pressed }) => [
+            styles.clearMedia,
+            { backgroundColor: pressed ? colors.divider : colors.backgroundSecondary },
+            mediaStats.entries === 0 && styles.buttonBusy,
+          ]}
+        >
+          <Ionicons name="trash-outline" size={20} color="#E5423D" />
+          <Text style={styles.logoutText}>Clear downloaded media</Text>
+        </Pressable>
+        <Text style={[styles.deleteHint, { color: colors.textSecondary }]}>
+          Media you received is cached for offline viewing with your activity feed and chats.
+        </Text>
+      </View>
+
       <Pressable
         onPress={() => {
           setDeleteText('');
@@ -133,8 +204,9 @@ export default function SettingsScreen() {
         <Text style={styles.logoutText}>Delete account</Text>
       </Pressable>
       <Text style={[styles.deleteHint, { color: colors.textSecondary }]}>
-        Permanently deletes your account, profile, chats and media.
+        Permanently deletes your account, profile, chats, calls, media and everything saved on this device.
       </Text>
+      </ScrollView>
 
       <Modal visible={editing} transparent animationType="fade" onRequestClose={() => setEditing(false)}>
         <KeyboardAvoidingView
@@ -202,8 +274,9 @@ export default function SettingsScreen() {
           <View style={[styles.modalCard, { backgroundColor: colors.backgroundSecondary }]}>
             <Text style={[styles.modalTitle, { color: colors.text }]}>Delete account?</Text>
             <Text style={[styles.deleteBody, { color: colors.textSecondary }]}>
-              This permanently deletes your account, profile, messages and media. This cannot be
-              undone. Type DELETE to confirm.
+              This permanently deletes your account, profile, chats, conversations, messages, call
+              history, media and everything saved on this device. This cannot be undone. Type DELETE
+              to confirm.
             </Text>
             <TextInput
               value={deleteText}
@@ -244,7 +317,10 @@ export default function SettingsScreen() {
 const styles = StyleSheet.create({
   safe: {
     flex: 1,
+  },
+  scrollContent: {
     padding: 16,
+    paddingBottom: 40,
   },
   profile: {
     alignItems: 'center',
@@ -346,6 +422,18 @@ const styles = StyleSheet.create({
   editBtnText: {
     fontSize: 15,
     fontWeight: '600',
+  },
+  storageWrap: {
+    gap: 10,
+    marginTop: 14,
+  },
+  clearMedia: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 12,
+    paddingVertical: 14,
+    gap: 8,
   },
   modalOverlay: {
     flex: 1,

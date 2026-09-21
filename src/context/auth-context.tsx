@@ -4,7 +4,11 @@ import { setAuthToken, setSessionExpiredHandler } from '@/lib/api-client';
 import { authApi } from '@/lib/api';
 import { setRefreshToken } from '@/lib/secure';
 import { registerDeviceForPush, unregisterDevice } from '@/lib/notifications';
+import { getDb, purgeDatabase } from '@/db/database';
+import { getKv, setKv, upsertUserProfile } from '@/db/repositories';
 import type { UserDTO } from '@/types/api';
+
+const DB_USER_KEY = 'db_user_id';
 
 type AuthStatus = 'loading' | 'signedIn' | 'signedOut';
 
@@ -25,6 +29,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<UserDTO | null>(null);
   const [token, setTokenState] = useState<string | null>(null);
 
+  const persistProfile = (u: UserDTO) => {
+    void (async () => {
+      const db = await getDb();
+      await upsertUserProfile(db, {
+        id: u.id,
+        name: u.name,
+        username: u.username,
+        email: u.email,
+        phone: u.phone,
+        bio: u.bio,
+        avatarUrl: u.avatarUrl,
+        lastSeenAt: u.lastSeenAt,
+      });
+    })().catch(() => undefined);
+  };
+
+  // The on-device SQLite cache belongs to a single account. If a different user
+  // id signs in (new account, or another account on a shared device), wipe the
+  // cache first so nobody ever sees another account's chats, messages, media or
+  // call history. The owning user id is remembered in app_kv across restarts.
+  const ensureUserScoped = async (userId: string) => {
+    const db = await getDb();
+    const owner = await getKv(db, DB_USER_KEY);
+    if (owner === userId) return;
+    await purgeDatabase();
+    await setKv(await getDb(), DB_USER_KEY, userId);
+  };
+
   useEffect(() => {
     let active = true;
     (async () => {
@@ -32,6 +64,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!active) return;
       if (storedToken && storedUser) {
         setAuthToken(storedToken);
+        await ensureUserScoped(storedUser.id).catch(() => undefined);
+        persistProfile(storedUser);
         setTokenState(storedToken);
         setUser(storedUser);
         setStatus('signedIn');
@@ -46,7 +80,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const applyCredentials = async (newToken: string, authedUser: UserDTO) => {
     setAuthToken(newToken);
+    await ensureUserScoped(authedUser.id).catch(() => undefined);
     await saveAuth(newToken, authedUser);
+    persistProfile(authedUser);
     setTokenState(newToken);
     setUser(authedUser);
     setStatus('signedIn');
@@ -85,6 +121,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const updateUser = (next: UserDTO) => {
     setUser(next);
+    persistProfile(next);
     if (token) void saveAuth(token, next);
   };
 

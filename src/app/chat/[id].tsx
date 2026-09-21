@@ -35,6 +35,7 @@ import { useCalls } from '@/context/call-context';
 import { useWaTheme } from '@/context/theme-context';
 import { useSocket, useSocketEvent } from '@/context/socket-context';
 import { enqueueOp, useSync, useSyncDb, useSyncFlush } from '@/context/sync-context';
+import { setActiveConversationId } from '@/lib/active-conversation';
 import { conversationsApi, messagesApi, stickersApi } from '@/lib/api';
 import { ApiError } from '@/lib/api-client';
 import { joinConversation, leaveConversation, sendMessageRead, sendTyping } from '@/lib/socket';
@@ -42,6 +43,7 @@ import { getDb } from '@/db/database';
 import {
   listAllMessageIds,
   listMessages,
+  listUserProfiles,
   markConversationRead,
   getConversation,
   setMessageDelivered as persistDelivered,
@@ -51,8 +53,13 @@ import {
   deleteMessagesLocal as persistDeleteMany,
   upsertMessage as persistMessage,
   upsertConversation as persistConversation,
+  upsertUserProfile as persistUserProfile,
+  saveConversationMembers as persistConversationMembers,
+  setConversationMeta as persistConversationMeta,
+  type StoredProfile,
 } from '@/db/repositories';
-import { getAttachmentUrl, uploadAsset, fileNameFromUri } from '@/lib/media';
+import { uploadAsset, fileNameFromUri } from '@/lib/media';
+import { useAttachmentSource, prewarmConversationMedia } from '@/lib/media-cache';
 import { MessageBubble } from '@/components/message-bubble';
 import { MessageActionsSheet } from '@/components/message-actions-sheet';
 import { Avatar } from '@/components/avatar';
@@ -175,6 +182,13 @@ export default function ChatScreen() {
 
   const myId = user?.id ?? '';
 
+  // Register as the active conversation so the realtime sink does not bump
+  // the unread counter / mis-handle receipts while this chat is on screen.
+  useEffect(() => {
+    setActiveConversationId(conversationId);
+    return () => setActiveConversationId(null);
+  }, [conversationId]);
+
   const [detail, setDetail] = useState<ConversationDetailDTO | null>(null);
   const [localConv, setLocalConv] = useState<ConversationDTO | null>(null);
   const [base, setBase] = useState<MessageDTO[]>([]);
@@ -186,6 +200,10 @@ export default function ChatScreen() {
   const [draft, setDraft] = useState('');
   const [typingUsers, setTypingUsers] = useState<string[]>([]);
   const [peers, setPeers] = useState<Record<string, boolean>>({});
+
+  // Offline identity cache: sender names resolve from SQLite so group chats
+  // render correctly even when the detail API call fails.
+  const [profiles, setProfiles] = useState<Map<string, StoredProfile>>(new Map());
 
   const [replyTarget, setReplyTarget] = useState<MessageDTO | null>(null);
   const [editTarget, setEditTarget] = useState<MessageDTO | null>(null);
@@ -427,6 +445,10 @@ export default function ChatScreen() {
         setLocalConv(conv);
         setLoading(false);
         void markConversationRead(db, conversationId);
+        // WhatsApp-style background prewarm: pull every attachment of the
+        // visible history into the persistent cache so re-opening is instant
+        // and offline-capable; the queue skips files already on disk.
+        prewarmConversationMedia(rows);
       } catch (e) {
         if (active) {
           setLoading(false);
@@ -443,6 +465,34 @@ export default function ChatScreen() {
         setLocalConv(loaded.conversation);
         const db = await getDb();
         await persistConversation(db, loaded.conversation);
+        // Cache member identities so sender names / avatars survive offline.
+        await persistConversationMembers(
+          db,
+          loaded.conversation.id,
+          loaded.members.map((m) => ({
+            id: m.id,
+            name: m.name,
+            username: m.username,
+            avatarUrl: m.avatarUrl,
+            role: m.role,
+            lastSeenAt: null,
+          })),
+        );
+        if (loaded.conversation.type === 'group') {
+          await persistConversationMeta(db, loaded.conversation.id, {
+            memberCount: loaded.members.length,
+            isGroupAdmin: loaded.members.some((m) => m.id === myId && m.role === 'admin'),
+          });
+        }
+        for (const member of loaded.members) {
+          await persistUserProfile(db, {
+            id: member.id,
+            name: member.name,
+            username: member.username,
+            avatarUrl: member.avatarUrl,
+            lastSeenAt: null,
+          });
+        }
         if (loaded.messages.length > 0) {
           const fresh = loaded.messages
             .slice()
@@ -451,6 +501,7 @@ export default function ChatScreen() {
           const existing = new Set(await listAllMessageIds(db, conversationId));
           const missing = fresh.filter((m) => !existing.has(m.id)).slice(0, 200);
           for (const m of missing) await persistMessage(db, m);
+          prewarmConversationMedia(missing);
         }
       } catch {
         // Best-effort server refresh — the cached copy is already visible.
@@ -460,7 +511,7 @@ export default function ChatScreen() {
     return () => {
       active = false;
     };
-  }, [conversationId]);
+  }, [conversationId, myId]);
 
   // Join the socket room for realtime events.
   useEffect(() => {
@@ -475,8 +526,22 @@ export default function ChatScreen() {
       const db = await getDb();
       const rows = await listMessages(db, conversationId, { limit: 200 });
       setBase(rows);
+      prewarmConversationMedia(rows);
     })();
   });
+
+  // Refresh the offline sender-identity cache whenever the visible set changes.
+  useEffect(() => {
+    const ids = new Set([
+      ...base.map((m) => m.senderId),
+      ...(detail?.members.map((m) => m.id) ?? []),
+    ]);
+    void (async () => {
+      const db = await getDb();
+      const map = await listUserProfiles(db, [...ids]);
+      setProfiles(map);
+    })();
+  }, [base, detail]);
 
   // Mark everything visible as read when the conversation opens. Read
   // receipts are only ever sent for the newest *incoming* message — never
@@ -1483,7 +1548,7 @@ export default function ChatScreen() {
   }
 
   const typingNames = typingUsers
-    .map((id) => detail?.members.find((m) => m.id === id)?.name ?? 'Someone')
+    .map((id) => profiles.get(id)?.name ?? detail?.members.find((m) => m.id === id)?.name ?? 'Someone')
     .join(', ');
 
   return (
@@ -1566,7 +1631,9 @@ export default function ChatScreen() {
                 message={item}
                 isOwn={item.senderId === myId}
                 showSenderName={isGroup && item.senderId !== myId}
-                senderName={detail?.members.find((m) => m.id === item.senderId)?.name}
+                senderName={
+                  profiles.get(item.senderId)?.name ?? detail?.members.find((m) => m.id === item.senderId)?.name
+                }
                 replyPreview={
                   ref
                     ? { senderId: ref.senderId, text: ref.text, type: ref.type }
@@ -2147,22 +2214,9 @@ function ImageViewerModal({
   attachment: AttachmentDTO;
   onClose: () => void;
 }) {
-  const [url, setUrl] = useState<string | null>(
-    attachment.previewUrl ?? attachment.gifUrl ?? attachment.localUri ?? null,
-  );
-
-  useEffect(() => {
-    let active = true;
-    if (!attachment.localUri && !attachment.previewUrl && !attachment.gifUrl) {
-      void getAttachmentUrl(attachment).then((u) => {
-        if (active) setUrl(u);
-      });
-    }
-    return () => {
-      active = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [attachment.id, attachment.storagePath]);
+  // Offline-first image viewer: uses the local cached file when available.
+  const source = useAttachmentSource(attachment);
+  const url = source.url;
 
   return (
     <Modal visible animationType="fade" onRequestClose={onClose} statusBarTranslucent>

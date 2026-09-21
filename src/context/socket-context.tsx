@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useAuth } from './auth-context';
 import { connectSocket, disconnectSocket, getSocket } from '@/lib/socket';
+import { installRealtimeHandlers } from '@/lib/realtime-sink';
 
 interface SocketValue {
   connected: boolean;
@@ -9,7 +10,7 @@ interface SocketValue {
 const SocketContext = createContext<SocketValue>({ connected: false });
 
 export function SocketProvider({ children }: { children: ReactNode }) {
-  const { status, token } = useAuth();
+  const { status, token, user } = useAuth();
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
@@ -21,12 +22,21 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
 
+    // Persist every realtime message event to SQLite — no matter which screen
+    // is open. The server now fans events out to this user's personal room.
+    let uninstall: (() => void) | undefined;
+    const userId = user?.id ?? '';
+    if (userId) {
+      uninstall = installRealtimeHandlers(socket, userId);
+    }
+
     return () => {
+      uninstall?.();
       socket.off('connect', onConnect);
       socket.off('disconnect', onDisconnect);
       disconnectSocket();
     };
-  }, [status, token]);
+  }, [status, token, user]);
 
   return <SocketContext.Provider value={{ connected }}>{children}</SocketContext.Provider>;
 }

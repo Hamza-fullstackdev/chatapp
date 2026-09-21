@@ -16,6 +16,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useWaTheme } from '@/context/theme-context';
 import { useAuth } from '@/context/auth-context';
 import { conversationsApi, usersApi } from '@/lib/api';
+import { cacheDirectoryUsers } from '@/lib/pull-sync';
+import { getDb } from '@/db/database';
+import { listAllUserProfiles } from '@/db/repositories';
 import { Avatar } from '@/components/avatar';
 import type { UserDTO } from '@/types/api';
 
@@ -30,14 +33,26 @@ export default function NewGroupScreen() {
 
   useEffect(() => {
     let active = true;
-    usersApi
-      .list()
-      .then(({ users }) => {
-        if (active) setMembers(users.filter((u) => u.id !== user?.id));
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
+    // Offline-first: show cached contacts immediately, then refresh.
+    (async () => {
+      const db = await getDb();
+      const cached = await listAllUserProfiles(db);
+      if (!active) return;
+      setMembers(
+        cached
+          .map((u) => ({ ...u, createdAt: '' }))
+          .filter((u) => u.id !== user?.id),
+      );
+      setLoading(false);
+      try {
+        const { users } = await usersApi.list();
+        await cacheDirectoryUsers(users);
+        if (!active) return;
+        setMembers(users.filter((u) => u.id !== user?.id));
+      } catch {
+        // The cached copy stays visible.
+      }
+    })();
     return () => {
       active = false;
     };

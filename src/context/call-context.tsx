@@ -6,6 +6,9 @@ import { useWaTheme } from '@/context/theme-context';
 import { useSocketEvent } from '@/context/socket-context';
 import { callsApi } from '@/lib/api';
 import { sendCallSignal } from '@/lib/socket';
+import { getDb } from '@/db/database';
+import { upsertCall } from '@/db/repositories';
+import { notifyLocalDb } from '@/lib/local-db-events';
 import { Avatar } from '@/components/avatar';
 import type { CallDTO } from '@/types/api';
 
@@ -41,35 +44,50 @@ export function CallProvider({ children }: { children: ReactNode }) {
     setIncoming((prev) => (prev?.call.id === callId ? null : prev));
   }, []);
 
+  const persistCall = useCallback((call: CallDTO) => {
+    void (async () => {
+      const db = await getDb();
+      await upsertCall(db, call);
+      notifyLocalDb();
+    })().catch(() => undefined);
+  }, []);
+
   useSocketEvent<IncomingCall>('call:incoming', (event) => {
     // Never interrupt an already-visible call screen with a second banner.
+    persistCall(event.call);
     setIncoming((prev) => (prev ? prev : { call: event.call, from: event.from }));
   });
 
   useSocketEvent<{ call: CallDTO }>('call:ongoing', (event) => {
+    persistCall(event.call);
     dismissByCallId(event.call.id);
   });
   useSocketEvent<{ call: CallDTO }>('call:rejected', (event) => {
+    persistCall(event.call);
     dismissByCallId(event.call.id);
   });
   useSocketEvent<{ call: CallDTO }>('call:cancelled', (event) => {
+    persistCall(event.call);
     dismissByCallId(event.call.id);
   });
   useSocketEvent<{ call: CallDTO }>('call:missed', (event) => {
+    persistCall(event.call);
     dismissByCallId(event.call.id);
   });
   useSocketEvent<{ call: CallDTO }>('call:ended', (event) => {
+    persistCall(event.call);
     dismissByCallId(event.call.id);
   });
 
   const startCall = useCallback(
     async (calleeId: string, callType: 'voice' | 'video' = 'voice', conversationId?: string) => {
       const { call } = await callsApi.create({ calleeId, callType, conversationId });
+      persistCall(call);
       router.push({ pathname: '/call/[id]', params: { id: call.id, type: callType } });
       // Give the call screen a beat to mount before the first offer.
       setTimeout(() => sendCallSignal(calleeId, call.id, 'ice', { noop: true }), 50);
     },
-    [router],
+    [persistCall, router],
   );
 
   const openCall = useCallback(

@@ -7,9 +7,10 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import { AppState } from 'react-native';
 import { useAuth } from './auth-context';
 import { useSocket } from './socket-context';
-import { syncApi, conversationsApi } from '@/lib/api';
+import { syncApi, conversationsApi, usersApi } from '@/lib/api';
 import {
   enqueueOp,
   getPendingOps,
@@ -18,7 +19,7 @@ import {
   subscribeQueue,
   type QueuedOp,
 } from '@/lib/offline-queue';
-import { pullAndApply, refreshConversations } from '@/lib/pull-sync';
+import { pullAndApply, refreshConversations, cacheDirectoryUsers } from '@/lib/pull-sync';
 import type { MessageDTO } from '@/types/api';
 
 export interface FlushedMessage {
@@ -102,13 +103,14 @@ function queueToOps(ops: QueuedOp[]): SyncTarget[] {
  *    `dbGeneration` counter bumps.
  */
 export function SyncProvider({ children }: SyncProviderProps) {
-  const { token, status } = useAuth();
+  const { token, status, user } = useAuth();
   const { connected } = useSocket();
   const [pendingCount, setPendingCount] = useState(0);
   const [flushing, setFlushing] = useState(false);
   const [dbGeneration, setDbGeneration] = useState(0);
 
   const lastPullCycle = useRef<string | null>(null);
+  const lastForegroundSync = useRef(0);
   const connectGeneration = useRef(0);
   const prevConnected = useRef(true);
   const flushListeners = useRef(new Set<(items: FlushedMessage[]) => void>());
@@ -167,11 +169,15 @@ export function SyncProvider({ children }: SyncProviderProps) {
     if (syncing.current) return;
     syncing.current = true;
     try {
-      const applied = await pullAndApply();
+      const applied = await pullAndApply(user?.id ?? '');
       if (applied > 0) {
         const { conversations } = await conversationsApi.list().catch(() => ({ conversations: [] }));
         if (Array.isArray(conversations) && conversations.length > 0) {
           await refreshConversations(conversations);
+        }
+        const { users } = await usersApi.list().catch(() => ({ users: [] }));
+        if (Array.isArray(users) && users.length > 0) {
+          await cacheDirectoryUsers(users);
         }
         bumpDb();
       }
@@ -180,7 +186,7 @@ export function SyncProvider({ children }: SyncProviderProps) {
     } finally {
       syncing.current = false;
     }
-  }, []);
+  }, [user?.id]);
 
   const pullRef = useRef(pull);
   useEffect(() => {
@@ -222,6 +228,25 @@ export function SyncProvider({ children }: SyncProviderProps) {
       notifyFlush(items);
       await pullRef.current();
     })();
+  }, [status, token, connected]);
+
+  // Foreground refresh: the local store stays authoritative even if a push or
+  // pull was missed while the app was backgrounded. Throttled to once/30s so
+  // quick background/foreground cycles don't spam the API.
+  useEffect(() => {
+    if (status !== 'signedIn' || !token) return;
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active' || !connected) return;
+      const now = Date.now();
+      if (now - lastForegroundSync.current < 30_000) return;
+      lastForegroundSync.current = now;
+      void (async () => {
+        const items = await flushRef.current();
+        notifyFlush(items);
+        await pullRef.current();
+      })();
+    });
+    return () => sub.remove();
   }, [status, token, connected]);
 
   const value: SyncContextValue = {

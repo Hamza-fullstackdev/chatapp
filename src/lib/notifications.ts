@@ -89,3 +89,31 @@ export async function unregisterDevice(): Promise<void> {
   }
   await storePushToken(null);
 }
+
+/**
+ * Present a notification immediately (no scheduling delay).
+ *
+ * The realtime sink calls this so incoming messages always banner — even when
+ * the remote push would be skipped (recipient is connected via socket) or no
+ * Expo push token exists (no EAS project configured). Tapping it routes to the
+ * conversation via `data.conversationId`.
+ */
+export async function presentIncomingMessageNotification(input: {
+  title: string;
+  body: string;
+  data: Record<string, unknown>;
+}): Promise<void> {
+  try {
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: input.title,
+        body: input.body,
+        data: input.data,
+        sound: 'default',
+      },
+      trigger: null,
+    });
+  } catch {
+    // Notifications are best-effort; never let them break message delivery.
+  }
+}

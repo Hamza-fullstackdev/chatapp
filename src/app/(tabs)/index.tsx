@@ -8,17 +8,21 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { router, Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '@/context/auth-context';
 import { useWaTheme } from '@/context/theme-context';
 import { useConversations } from '@/hooks/use-data';
+import { useLocalDb } from '@/lib/local-db-events';
+import { useSyncDb } from '@/context/sync-context';
 import { ConversationItem } from '@/components/conversation-item';
 import { conversationsApi } from '@/lib/api';
 import { getDb } from '@/db/database';
-import { deleteConversationsLocal } from '@/db/repositories';
+import { deleteConversationsLocal, listConversations } from '@/db/repositories';
+import { refreshConversations } from '@/lib/pull-sync';
+import { prewarmRecentConversations } from '@/lib/media-cache';
 import type { ConversationDTO } from '@/types/api';
 
 function HeaderRight() {
@@ -38,7 +42,43 @@ function HeaderRight() {
 export default function ChatsScreen() {
   const { user } = useAuth();
   const { colors, dark } = useWaTheme();
-  const { data: conversations, loading, error, refresh } = useConversations(user?.id ?? '', true);
+  const { data: apiConversations, loading, error, refresh } = useConversations(user?.id ?? '', true);
+
+  // SQLite-first: the conversation list renders from the local cache so chats
+  // are visible instantly and keep working offline. The API poll only enriches
+  // (and re-persists) the cache in the background.
+  const [cached, setCached] = useState<ConversationDTO[] | null>(null);
+
+  const reloadCache = useCallback(async () => {
+    const db = await getDb();
+    const rows = await listConversations(db, user?.id ?? '');
+    setCached(rows);
+    // Start WhatsApp-style background downloads for recent attachment media so
+    // chats open instantly from cache; the queue is deduped and bounded.
+    void prewarmRecentConversations(rows);
+  }, [user?.id]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void reloadCache();
+  }, [reloadCache]);
+
+  // Re-read SQLite whenever socket messages / pull-sync / media changed it.
+  useLocalDb(() => {
+    void reloadCache();
+  });
+  useSyncDb(() => {
+    void reloadCache();
+  });
+
+  // Persist fresh server lists into the store (the device stays the source of
+  // truth for what happened even after the latest network fetch).
+  useEffect(() => {
+    if (!apiConversations || apiConversations.length === 0) return;
+    void refreshConversations(apiConversations);
+  }, [apiConversations]);
+
+  const conversations = cached ?? apiConversations;
 
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -94,6 +134,7 @@ export default function ChatsScreen() {
       await conversationsApi.remove(ids);
       const db = await getDb();
       await deleteConversationsLocal(db, ids);
+      await reloadCache();
     } catch (e) {
       Alert.alert('Could not delete chats', e instanceof Error ? e.message : 'Please try again');
     } finally {
@@ -168,7 +209,7 @@ export default function ChatsScreen() {
         <View style={styles.center}>
           <ActivityIndicator size="large" color={colors.brand} />
         </View>
-      ) : error ? (
+      ) : error && conversations == null ? (
         <View style={styles.center}>
           <Text style={[styles.errorText, { color: colors.text }]}>Couldn&apos;t load chats</Text>
           <Text style={[styles.errorDetail, { color: colors.textSecondary }]}>{error}</Text>

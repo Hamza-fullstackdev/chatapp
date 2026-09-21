@@ -2,11 +2,11 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Animated, PanResponder, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
-import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
+import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import type { AttachmentDTO, MessageDTO } from '@/types/api';
 import { formatMessageTime } from '@/lib/format';
 import { useWaTheme } from '@/context/theme-context';
-import { getAttachmentUrl } from '@/lib/media';
+import { downloadAttachment, useAttachmentDownloadState, useAttachmentSource } from '@/lib/media-cache';
 
 function formatPlayDuration(seconds: number): string {
   const total = Math.max(0, Math.floor(seconds));
@@ -21,15 +21,21 @@ let activePlayback: { key: symbol; pause: () => void } | null = null;
 /**
  * WhatsApp-style voice note: play/pause button, a tappable progress bar and
  * the elapsed duration. The player instance is owned by the bubble and
- * released automatically on unmount. The remote file is downloaded first so
- * seeking is exact and replays work reliably.
+ * released automatically on unmount.
+ *
+ * The app already downloads attachments to its own persistent cache (see
+ * media-cache.ts), so playback is fed the local `file://` URI when available
+ * and otherwise streams the remote URL directly — we deliberately do NOT use
+ * expo-audio's `downloadFirst`, whose internal downloader fails for short-lived
+ * signed URLs (logging "failed to download source, using original").
  */
-function AudioPlayerBox({ uri, durationMs }: { uri: string; durationMs?: number | null }) {
+function AudioPlayerBox({ attachment, uri, durationMs }: { attachment: AttachmentDTO; uri: string; durationMs?: number | null }) {
   const { colors } = useWaTheme();
-  const player = useAudioPlayer(uri, { downloadFirst: true, updateInterval: 250 });
+  const player = useAudioPlayer(uri, { updateInterval: 250 });
   const status = useAudioPlayerStatus(player);
   const [trackWidth, setTrackWidth] = useState(0);
   const boxKey = useRef(Symbol('audio-box'));
+  const isRemote = /^https?:\/\//i.test(uri);
 
   useEffect(() => {
     const key = boxKey.current;
@@ -37,6 +43,15 @@ function AudioPlayerBox({ uri, durationMs }: { uri: string; durationMs?: number 
       if (activePlayback?.key === key) activePlayback = null;
     };
   }, []);
+
+  // Keep the offline cache warm while a remote note streams, so replays and
+  // offline visits hit the local file (which hot-swaps into this bubble).
+  useEffect(() => {
+    if (isRemote && attachment) {
+      void downloadAttachment(attachment);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uri]);
 
   const knownDuration =
     status.duration && status.duration > 0
@@ -48,17 +63,20 @@ function AudioPlayerBox({ uri, durationMs }: { uri: string; durationMs?: number 
   const shownTime = status.currentTime > 0 ? status.currentTime : knownDuration;
 
   const togglePlay = () => {
+    // iOS: never let the system mute playback; also leave the mic free by
+    // keeping allowsRecording off while playing.
+    setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true }).catch(() => {});
     if (status.playing) {
       player.pause();
       if (activePlayback?.key === boxKey.current) activePlayback = null;
       return;
     }
-    // Natural end of track: rewind so replay starts from the beginning.
-    if (status.didJustFinish) {
-      player.seekTo(0);
-    }
     if (activePlayback && activePlayback.key !== boxKey.current) {
       activePlayback.pause();
+    }
+    // Natural end of track: rewind so a replay starts from the beginning.
+    if (status.didJustFinish) {
+      void player.seekTo(0);
     }
     activePlayback = { key: boxKey.current, pause: () => player.pause() };
     void player.play();
@@ -84,12 +102,16 @@ function AudioPlayerBox({ uri, durationMs }: { uri: string; durationMs?: number 
         onPress={togglePlay}
         style={[styles.playBtn, { backgroundColor: colors.brand }]}
       >
-        <Ionicons
-          name={status.playing ? 'pause' : 'play'}
-          size={16}
-          color="#FFFFFF"
-          style={status.playing ? undefined : styles.playIcon}
-        />
+        {status.isLoaded ? (
+          <Ionicons
+            name={status.playing ? 'pause' : 'play'}
+            size={16}
+            color="#FFFFFF"
+            style={status.playing ? undefined : styles.playIcon}
+          />
+        ) : (
+          <ActivityIndicator size="small" color="#FFFFFF" />
+        )}
       </Pressable>
       <Pressable style={styles.audioBar} onPress={(e) => seekToFraction(e.nativeEvent.locationX)}>
         <View
@@ -170,28 +192,48 @@ function MediaStatus({ status, onRetry }: { status: string; onRetry?: () => void
   return <Tick status={status} />;
 }
 
+/**
+ * WhatsApp-style download control for media messages. Hidden once the bytes
+ * are on disk (downloads are persistent, so it never needs to be tapped twice),
+ * a spinner while the background queue is fetching, and a tap target otherwise.
+ */
+function DownloadChip({ attachment }: { attachment: AttachmentDTO }) {
+  const { state, download } = useAttachmentDownloadState(attachment);
+  if (state === 'downloaded') return null;
+  return (
+    <Pressable
+      hitSlop={8}
+      onPress={state === 'idle' ? download : undefined}
+      style={[styles.downloadChip, { backgroundColor: 'rgba(0,0,0,0.45)' }]}
+    >
+      {state === 'downloading' ? (
+        <ActivityIndicator size="small" color="#FFFFFF" />
+      ) : (
+        <Ionicons name="download-outline" size={15} color="#FFFFFF" />
+      )}
+    </Pressable>
+  );
+}
+
 function AttachmentMedia({ attachment, isOwn }: { attachment: AttachmentDTO; isOwn: boolean }) {
   const { colors } = useWaTheme();
-  const [url, setUrl] = useState<string | null>(attachment.previewUrl ?? attachment.gifUrl ?? attachment.localUri ?? null);
-
-  useEffect(() => {
-    let active = true;
-    if (!attachment.localUri && !attachment.previewUrl && !attachment.gifUrl) {
-      void getAttachmentUrl(attachment).then((u) => {
-        if (active) setUrl(u);
-      });
-    }
-    return () => {
-      active = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [attachment.id, attachment.storagePath]);
+  // Offline-first: resolves to the locally-cached file when downloaded,
+  // else falls back to the remote URL and warms the cache in the background.
+  const source = useAttachmentSource(attachment);
+  const url = source.url;
 
   if (attachment.type === 'image' || attachment.type === 'gif' || attachment.type === 'sticker') {
     if (!url) {
       return <View style={[styles.mediaPlaceholder, { backgroundColor: colors.divider }]} />;
     }
-    return <Image source={{ uri: url }} style={styles.mediaImage} contentFit="cover" transition={100} />;
+    return (
+      <View style={styles.mediaContainer}>
+        <Image source={{ uri: url }} style={styles.mediaImage} contentFit="cover" transition={100} />
+        <View style={styles.downloadChipOverlay}>
+          <DownloadChip attachment={attachment} />
+        </View>
+      </View>
+    );
   }
 
   if (attachment.type === 'audio') {
@@ -202,7 +244,12 @@ function AttachmentMedia({ attachment, isOwn }: { attachment: AttachmentDTO; isO
         </View>
       );
     }
-    return <AudioPlayerBox key={url} uri={url} durationMs={attachment.durationMs} />;
+    return (
+      <View style={styles.audioBox}>
+        <AudioPlayerBox key={url} attachment={attachment} uri={url} durationMs={attachment.durationMs} />
+        <DownloadChip attachment={attachment} />
+      </View>
+    );
   }
 
   const name =
@@ -217,6 +264,7 @@ function AttachmentMedia({ attachment, isOwn }: { attachment: AttachmentDTO; isO
       <Text style={[styles.fileName, { color: colors.text }]} numberOfLines={2}>
         {attachment.mimeType ?? attachment.type}
       </Text>
+      <DownloadChip attachment={attachment} />
     </View>
   );
 }
@@ -534,6 +582,21 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     maxWidth: 240,
   },
+  mediaContainer: {
+    position: 'relative',
+  },
+  downloadChipOverlay: {
+    position: 'absolute',
+    top: 6,
+    right: 6,
+  },
+  downloadChip: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   mediaBox: {
     marginBottom: 4,
     borderRadius: 6,
@@ -566,7 +629,7 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
   },
   fileWrap: {
-    maxWidth: 220,
+    maxWidth: 240,
   },
   fileBox: {
     flexDirection: 'row',
@@ -585,6 +648,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: 8,
+  },
+  audioBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 4,
   },
   audioRow: {
     flexDirection: 'row',

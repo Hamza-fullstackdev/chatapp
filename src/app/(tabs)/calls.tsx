@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -13,7 +13,10 @@ import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useWaTheme } from '@/context/theme-context';
 import { useCalls } from '@/context/call-context';
+import { useLocalDb } from '@/lib/local-db-events';
 import { callsApi } from '@/lib/api';
+import { getDb } from '@/db/database';
+import { deleteCallsLocal, listCalls, upsertCall } from '@/db/repositories';
 import { Avatar } from '@/components/avatar';
 import { formatTime } from '@/lib/format';
 import type { CallDTO } from '@/types/api';
@@ -35,11 +38,32 @@ export default function CallsScreen() {
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
+  // SQLite-first: show the cached call history instantly (even offline), then
+  // refresh from the API in the background.
+  const reloadCache = useCallback(async () => {
+    const db = await getDb();
+    const rows = await listCalls(db, 100);
+    setCalls((prev) => (prev == null ? rows : prev));
+  }, []);
+
+  useLocalDb(() => {
+    void reloadCache();
+  });
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void reloadCache();
+  }, [reloadCache]);
+
   const load = useCallback(() => {
     setLoading(true);
     callsApi
       .history(50)
-      .then(({ calls: list }) => setCalls(list))
+      .then(async ({ calls: list }) => {
+        setCalls(list);
+        const db = await getDb();
+        for (const call of list) await upsertCall(db, call);
+      })
       .catch((e) => setError(e instanceof Error ? e.message : 'Could not load calls'))
       .finally(() => setLoading(false));
   }, []);
@@ -85,6 +109,8 @@ export default function CallsScreen() {
   const deleteSelected = async (ids: string[]) => {
     try {
       await callsApi.remove(ids);
+      const db = await getDb();
+      await deleteCallsLocal(db, ids);
       setCalls((prev) => (prev ? prev.filter((c) => !ids.includes(c.id)) : prev));
     } catch (e) {
       Alert.alert('Could not delete calls', e instanceof Error ? e.message : 'Please try again');
@@ -125,7 +151,7 @@ export default function CallsScreen() {
         <View style={styles.center}>
           <ActivityIndicator size="large" color={colors.brand} />
         </View>
-      ) : error ? (
+      ) : error && calls == null ? (
         <View style={styles.center}>
           <Text style={[styles.errorText, { color: colors.text }]}>Couldn&apos;t load calls</Text>
           <Text style={[styles.errorDetail, { color: colors.textSecondary }]}>{error}</Text>
