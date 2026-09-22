@@ -67,6 +67,7 @@ type ConversationRow = {
   updated_at: string | null;
   member_count: number;
   is_group_admin: number;
+  left_at: string | null;
 };
 
 function rowToConversation(row: ConversationRow): ConversationDTO {
@@ -78,6 +79,7 @@ function rowToConversation(row: ConversationRow): ConversationDTO {
     otherUserId: row.other_user_id,
     otherUserName: row.other_user_name,
     otherUserAvatarUrl: row.other_user_avatar_url,
+    leftAt: row.left_at ?? null,
     lastMessage: row.last_message_id
       ? {
           id: row.last_message_id,
@@ -1091,6 +1093,145 @@ export async function deleteCallsLocal(db: SQLiteDatabase, ids: string[]): Promi
 
 export async function clearCallsLocal(db: SQLiteDatabase): Promise<void> {
   await db.runAsync('DELETE FROM calls');
+}
+
+// ---------------------------------------------------------------------------
+// Statuses (offline WhatsApp-style status cache)
+// ---------------------------------------------------------------------------
+
+type StatusRow = {
+  id: string;
+  user_id: string;
+  type: string;
+  text: string | null;
+  font: string | null;
+  bg_color: string | null;
+  media_path: string | null;
+  media_thumbnail_path: string | null;
+  mime_type: string | null;
+  audience: string;
+  exclude_user_ids: string | null;
+  include_user_ids: string | null;
+  created_at: string;
+  expires_at: string;
+  viewed: number;
+  view_count: number;
+};
+
+function rowToStatus(row: StatusRow): import('@/types/api').StatusDTO {
+  const parseIds = (raw: string | null): string[] => {
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [];
+    } catch {
+      return [];
+    }
+  };
+  return {
+    id: row.id,
+    userId: row.user_id,
+    type: row.type,
+    text: row.text,
+    font: row.font,
+    bgColor: row.bg_color,
+    mediaPath: row.media_path,
+    mediaThumbnailPath: row.media_thumbnail_path,
+    mimeType: row.mime_type,
+    audience: row.audience as import('@/types/api').StatusAudience,
+    excludeUserIds: parseIds(row.exclude_user_ids),
+    includeUserIds: parseIds(row.include_user_ids),
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    viewed: row.viewed === 1,
+    viewCount: row.view_count,
+  };
+}
+
+export async function upsertStatus(
+  db: SQLiteDatabase,
+  status: import('@/types/api').StatusDTO,
+): Promise<void> {
+  await db.runAsync(
+    `INSERT OR REPLACE INTO statuses (
+      id, user_id, type, text, font, bg_color, media_path, media_thumbnail_path,
+      mime_type, audience, exclude_user_ids, include_user_ids, created_at, expires_at,
+      viewed, view_count
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    status.id,
+    status.userId,
+    status.type,
+    status.text,
+    status.font,
+    status.bgColor,
+    status.mediaPath,
+    status.mediaThumbnailPath,
+    status.mimeType,
+    status.audience,
+    status.excludeUserIds ? JSON.stringify(status.excludeUserIds) : null,
+    status.includeUserIds ? JSON.stringify(status.includeUserIds) : null,
+    status.createdAt,
+    status.expiresAt,
+    status.viewed ? 1 : 0,
+    status.viewCount ?? 0,
+  );
+}
+
+export async function deleteStatusLocal(db: SQLiteDatabase, id: string): Promise<void> {
+  await db.runAsync('DELETE FROM statuses WHERE id = ?', id);
+}
+
+export async function deleteStatusesByUserLocal(db: SQLiteDatabase, userId: string): Promise<void> {
+  await db.runAsync('DELETE FROM statuses WHERE user_id = ?', userId);
+}
+
+export async function deleteExpiredStatusesLocal(db: SQLiteDatabase, nowIso: string): Promise<void> {
+  await db.runAsync('DELETE FROM statuses WHERE expires_at <= ?', nowIso);
+}
+
+export async function listStatuses(db: SQLiteDatabase): Promise<import('@/types/api').StatusDTO[]> {
+  const rows = await db.getAllAsync<StatusRow>('SELECT * FROM statuses ORDER BY created_at DESC');
+  return rows.map(rowToStatus);
+}
+
+export async function getStatus(db: SQLiteDatabase, id: string): Promise<import('@/types/api').StatusDTO | null> {
+  const row = await db.getFirstAsync<StatusRow>('SELECT * FROM statuses WHERE id = ?', id);
+  return row ? rowToStatus(row) : null;
+}
+
+export async function setStatusViewedLocal(db: SQLiteDatabase, id: string): Promise<void> {
+  await db.runAsync('UPDATE statuses SET viewed = 1 WHERE id = ?', id);
+}
+
+export async function incrementStatusViewsLocal(db: SQLiteDatabase, id: string): Promise<void> {
+  await db.runAsync('UPDATE statuses SET view_count = view_count + 1 WHERE id = ?', id);
+}
+
+export type StoredStatusView = { statusId: string; userId: string; viewedAt: string };
+
+export async function upsertStatusView(
+  db: SQLiteDatabase,
+  view: StoredStatusView,
+): Promise<void> {
+  await db.runAsync(
+    `INSERT OR REPLACE INTO status_views (id, status_id, user_id, viewed_at)
+     VALUES (?, ?, ?, ?)`,
+    `${view.statusId}:${view.userId}`,
+    view.statusId,
+    view.userId,
+    view.viewedAt,
+  );
+}
+
+export async function listStatusViews(
+  db: SQLiteDatabase,
+  statusId: string,
+): Promise<StoredStatusView[]> {
+  const rows = await db.getAllAsync<{ status_id: string; user_id: string; viewed_at: string }>(
+    'SELECT status_id, user_id, viewed_at FROM status_views WHERE status_id = ? ORDER BY viewed_at DESC',
+    statusId,
+  );
+  return rows.map((r) => ({ statusId: r.status_id, userId: r.user_id, viewedAt: r.viewed_at }));
 }
 
 // ---------------------------------------------------------------------------

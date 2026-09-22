@@ -1,6 +1,7 @@
 import { getDb } from '@/db/database';
 import {
   deleteMessageRow,
+  deleteStatusLocal,
   getSyncCursor,
   setMessageReactions,
   setSyncCursor,
@@ -8,6 +9,7 @@ import {
   updateConversationInfo,
   upsertConversation,
   upsertMessage,
+  upsertStatus,
   refreshConversationFromMessage,
   upsertUserProfile,
   cacheUsers,
@@ -109,6 +111,17 @@ async function applyChange(
         name: typeof payload.name === 'string' ? payload.name : undefined,
         avatarUrl: typeof payload.avatarUrl === 'string' ? payload.avatarUrl : undefined,
       });
+      notifyLocalDb();
+      return;
+    }
+
+    if (change.entityType === 'status') {
+      if (change.operation === 'delete') {
+        const id = String(payload.statusId ?? change.entityId);
+        await deleteStatusLocal(db, id);
+      } else if (typeof payload.id === 'string') {
+        await upsertStatus(db, payload as import('@/types/api').StatusDTO);
+      }
       notifyLocalDb();
       return;
     }

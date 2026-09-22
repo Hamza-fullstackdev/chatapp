@@ -145,6 +145,31 @@ const TABLE_DDL: string[] = [
     peer_avatar_url TEXT,
     is_outgoing INTEGER NOT NULL DEFAULT 0
   )`,
+  `CREATE TABLE IF NOT EXISTS statuses (
+    id TEXT PRIMARY KEY NOT NULL,
+    user_id TEXT NOT NULL,
+    type TEXT NOT NULL DEFAULT 'text',
+    text TEXT,
+    font TEXT,
+    bg_color TEXT,
+    media_path TEXT,
+    media_thumbnail_path TEXT,
+    mime_type TEXT,
+    audience TEXT NOT NULL DEFAULT 'my_contacts',
+    exclude_user_ids TEXT,
+    include_user_ids TEXT,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    viewed INTEGER NOT NULL DEFAULT 0,
+    view_count INTEGER NOT NULL DEFAULT 0
+  )`,
+  `CREATE TABLE IF NOT EXISTS status_views (
+    id TEXT PRIMARY KEY NOT NULL,
+    status_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    viewed_at TEXT NOT NULL,
+    FOREIGN KEY (status_id) REFERENCES statuses(id) ON DELETE CASCADE
+  )`,
 ];
 
 type IndexDef = { name: string; table: string; columns: string[] };
@@ -159,6 +184,7 @@ const INDEX_DEFS: IndexDef[] = [
   { name: 'idx_calls_created', table: 'calls', columns: ['created_at DESC'] },
   { name: 'idx_conv_members_conv', table: 'conversation_members', columns: ['conversation_id'] },
   { name: 'idx_user_profiles_name', table: 'user_profiles', columns: ['full_name'] },
+  { name: 'idx_statuses_user', table: 'statuses', columns: ['user_id', 'created_at DESC'] },
 ];
 
 const INDEX_DDL: string[] = INDEX_DEFS.map(
@@ -384,6 +410,16 @@ async function migrationV9(db: SQLite.SQLiteDatabase): Promise<void> {
   await createIndexes(db);
 }
 
+/**
+ * Migration 10 — WhatsApp-style statuses.
+ * Adds the local statuses + status_views cache tables.
+ */
+async function migrationV10(db: SQLite.SQLiteDatabase): Promise<void> {
+  await repairSchema(db);
+  for (const ddl of TABLE_DDL) await db.execAsync(ddl);
+  await createIndexes(db);
+}
+
 const MIGRATIONS: MigrationStep[] = [
   MIGRATION_V1,
   migrationV2,
@@ -394,6 +430,7 @@ const MIGRATIONS: MigrationStep[] = [
   migrationV7,
   migrationV8,
   migrationV9,
+  migrationV10,
 ];
 
 async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {

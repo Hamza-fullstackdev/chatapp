@@ -4,8 +4,10 @@ import { getDb } from '@/db/database';
 import {
   clearConversationLastMessageIfMatch,
   deleteMessageRow,
+  deleteStatusLocal,
   getConversation,
   getUserProfile,
+  incrementStatusViewsLocal,
   markConversationLastMessageStatus,
   markMessagesDeliveredThrough,
   markMessagesReadThrough,
@@ -13,6 +15,8 @@ import {
   setMessageReactions,
   touchUserProfile,
   upsertMessage,
+  upsertStatus,
+  upsertStatusView,
 } from '@/db/repositories';
 import { getActiveConversationId } from '@/lib/active-conversation';
 import { prewarmMessageMedia } from '@/lib/media-cache';
@@ -26,6 +30,9 @@ import type {
   MessageDeliveredEvent,
   MessageReadEvent,
   PresenceUpdateEvent,
+  StatusDeleteEvent,
+  StatusDTO,
+  StatusViewEvent,
 } from '@/types/api';
 
 /**
@@ -161,6 +168,34 @@ export function installRealtimeHandlers(socket: Socket, currentUserId: string): 
     });
   };
 
+  const onStatusNew = (status: StatusDTO) => {
+    run(async () => {
+      const db = await getDb();
+      await upsertStatus(db, status);
+      notifyLocalDb();
+    });
+  };
+
+  const onStatusDelete = (event: StatusDeleteEvent) => {
+    run(async () => {
+      await deleteStatusLocal(await getDb(), event.statusId);
+      notifyLocalDb();
+    });
+  };
+
+  const onStatusView = (event: StatusViewEvent) => {
+    run(async () => {
+      const db = await getDb();
+      await incrementStatusViewsLocal(db, event.statusId);
+      await upsertStatusView(db, {
+        statusId: event.statusId,
+        userId: event.userId,
+        viewedAt: event.viewedAt,
+      });
+      notifyLocalDb();
+    });
+  };
+
   socket.on('message:new', onMessageNew);
   socket.on('message:update', onMessageUpdate);
   socket.on('message:delete', onMessageDelete);
@@ -168,6 +203,9 @@ export function installRealtimeHandlers(socket: Socket, currentUserId: string): 
   socket.on('message:read', onMessageRead);
   socket.on('message:delivered', onMessageDelivered);
   socket.on('presence:update', onPresence);
+  socket.on('status:new', onStatusNew);
+  socket.on('status:delete', onStatusDelete);
+  socket.on('status:view', onStatusView);
 
   return () => {
     socket.off('message:new', onMessageNew);
@@ -177,5 +215,8 @@ export function installRealtimeHandlers(socket: Socket, currentUserId: string): 
     socket.off('message:read', onMessageRead);
     socket.off('message:delivered', onMessageDelivered);
     socket.off('presence:update', onPresence);
+    socket.off('status:new', onStatusNew);
+    socket.off('status:delete', onStatusDelete);
+    socket.off('status:view', onStatusView);
   };
 }

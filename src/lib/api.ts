@@ -9,6 +9,9 @@ import type {
   MessageDTO,
   ReactionDTO,
   StickerDTO,
+  StatusAudience,
+  StatusDTO,
+  StatusViewerDTO,
   SyncPushResponse,
   SyncResponse,
   UploadTargetDTO,
@@ -86,11 +89,16 @@ export const conversationsApi = {
   createPrivate(userId: string): Promise<{ conversation: ConversationDTO }> {
     return http.post<{ conversation: ConversationDTO }>('/api/conversations/private', { userId });
   },
-  createGroup(name: string, memberIds: string[], description?: string): Promise<{ conversation: ConversationDTO }> {
+  createGroup(
+    name: string,
+    memberIds: string[],
+    opts: { description?: string | null; avatarUrl?: string | null } = {},
+  ): Promise<{ conversation: ConversationDTO }> {
     return http.post<{ conversation: ConversationDTO }>('/api/conversations/group', {
       name,
       memberIds,
-      description,
+      description: opts.description,
+      avatarUrl: opts.avatarUrl,
     });
   },
   markRead(id: string): Promise<{ ok: boolean }> {
@@ -205,6 +213,35 @@ export const callsApi = {
 export const stickersApi = {
   list(): Promise<{ stickers: StickerDTO[] }> {
     return http.get<{ stickers: StickerDTO[] }>('/api/stickers');
+  },
+};
+
+export const statusesApi = {
+  list(): Promise<{ statuses: StatusDTO[] }> {
+    return http.get<{ statuses: StatusDTO[] }>('/api/statuses');
+  },
+  create(input: {
+    type: 'text' | 'image' | 'video';
+    text?: string | null;
+    font?: string | null;
+    bgColor?: string | null;
+    mediaPath?: string | null;
+    mediaThumbnailPath?: string | null;
+    mimeType?: string | null;
+    audience: StatusAudience;
+    excludeUserIds?: string[];
+    includeUserIds?: string[];
+  }): Promise<{ status: StatusDTO }> {
+    return http.post<{ status: StatusDTO }>('/api/statuses', input);
+  },
+  viewers(id: string): Promise<{ viewers: StatusViewerDTO[] }> {
+    return http.get<{ viewers: StatusViewerDTO[] }>(`/api/statuses/${id}/viewers`);
+  },
+  markViewed(id: string): Promise<{ ok: boolean }> {
+    return http.post<{ ok: boolean }>(`/api/statuses/${id}/viewed`);
+  },
+  remove(id: string): Promise<{ ok: boolean }> {
+    return http.delete<{ ok: boolean }>(`/api/statuses/${id}`);
   },
 };
 

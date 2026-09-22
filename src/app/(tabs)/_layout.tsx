@@ -2,12 +2,15 @@ import { Tabs, usePathname } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useWaTheme } from '@/context/theme-context';
+import { useAuth } from '@/context/auth-context';
+import { Avatar } from '@/components/avatar';
 
 export default function TabsLayout() {
   const { colors, dark } = useWaTheme();
   const insets = useSafeAreaInsets();
   const pathname = usePathname();
   const onChat = pathname.startsWith('/chat');
+  const { user } = useAuth();
 
   return (
     <Tabs
@@ -41,13 +44,17 @@ export default function TabsLayout() {
         }}
       />
       <Tabs.Screen
-        name="contacts"
+        name="status"
         options={{
-          title: 'Contacts',
+          title: 'Status',
           tabBarIcon: ({ color, size }) => (
-            <Ionicons name={pathname === '/contacts' ? 'person' : 'person-outline'} color={color} size={size - 2} />
+            <Ionicons name={pathname === '/status' ? 'ellipse' : 'ellipse-outline'} color={color} size={size - 2} />
           ),
         }}
+      />
+      <Tabs.Screen
+        name="contacts"
+        options={{ href: null }}
       />
       <Tabs.Screen
         name="calls"
@@ -61,9 +68,9 @@ export default function TabsLayout() {
       <Tabs.Screen
         name="settings"
         options={{
-          title: 'Settings',
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name={pathname === '/settings' ? 'settings' : 'settings-outline'} color={color} size={size - 2} />
+          title: 'Profile',
+          tabBarIcon: ({ size }) => (
+            <Avatar name={user?.fullName ?? ''} uri={user?.avatarUrl} size={size} />
           ),
         }}
       />

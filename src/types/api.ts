@@ -69,6 +69,8 @@ export interface ConversationDTO {
   lastMessage: LastMessageDTO | null;
   unreadCount: number;
   updatedAt: string | null;
+  /** When the requesting user left / was removed from this (group) conversation. */
+  leftAt: string | null;
 }
 
 export interface ConversationDetailDTO {
@@ -130,6 +132,36 @@ export interface UploadTargetDTO {
     mimeType: string;
     size?: number;
   };
+}
+
+export type StatusAudience = 'my_contacts' | 'my_contacts_except' | 'only_share_with';
+
+export interface StatusDTO {
+  id: string;
+  userId: string;
+  type: string;
+  text: string | null;
+  font: string | null;
+  bgColor: string | null;
+  mediaPath: string | null;
+  mediaThumbnailPath: string | null;
+  mimeType: string | null;
+  audience: StatusAudience;
+  createdAt: string;
+  expiresAt: string;
+  viewed: boolean;
+  viewCount: number;
+  /** Local-cache only: the raw audience lists, kept for round-tripping. */
+  excludeUserIds?: string[];
+  includeUserIds?: string[];
+}
+
+export interface StatusViewerDTO {
+  userId: string;
+  name: string;
+  username: string;
+  avatarUrl: string | null;
+  viewedAt: string;
 }
 
 export interface ApiEnvelope<T> {
@@ -212,6 +244,17 @@ export interface GroupUpdateEvent {
   role?: string;
   name?: string | null;
   avatarUrl?: string | null;
+}
+
+export interface StatusDeleteEvent {
+  statusId: string;
+  userId: string;
+}
+
+export interface StatusViewEvent {
+  statusId: string;
+  userId: string;
+  viewedAt: string;
 }
 
 export interface IncomingCallEvent {

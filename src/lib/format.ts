@@ -41,6 +41,19 @@ export function formatMessageTime(iso: string): string {
   return formatTime(iso);
 }
 
+/** Relative-ish timestamp used in the status feed / viewer. */
+export function formatStatusTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const now = new Date();
+  const diffMs = now.getTime() - d.getTime();
+  const mins = Math.floor(diffMs / 60_000);
+  if (mins < 1) return 'just now';
+  if (diffMs < 86_400_000) return `Today, ${formatTime(iso)}`;
+  if (diffMs < 172_800_000) return `Yesterday, ${formatTime(iso)}`;
+  return formatConversationTime(iso);
+}
+
 export function formatLastSeen(iso: string | null): string {
   if (!iso) return 'last seen recently';
   const d = new Date(iso);
