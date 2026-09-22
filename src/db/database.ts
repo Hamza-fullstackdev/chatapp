@@ -48,7 +48,8 @@ const TABLE_DDL: string[] = [
     last_read_message_id TEXT,
     updated_at TEXT,
     member_count INTEGER NOT NULL DEFAULT 0,
-    is_group_admin INTEGER NOT NULL DEFAULT 0
+    is_group_admin INTEGER NOT NULL DEFAULT 0,
+    left_at TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY NOT NULL,
@@ -261,6 +262,7 @@ async function migrationV2(db: SQLite.SQLiteDatabase): Promise<void> {
     ['last_message_has_attachments', 'INTEGER NOT NULL DEFAULT 0'],
     ['member_count', 'INTEGER NOT NULL DEFAULT 0'],
     ['is_group_admin', 'INTEGER NOT NULL DEFAULT 0'],
+    ['left_at', 'TEXT'],
   ]);
   await ensureColumns(db, 'messages', [
     ['client_message_id', 'TEXT'],
@@ -420,6 +422,19 @@ async function migrationV10(db: SQLite.SQLiteDatabase): Promise<void> {
   await createIndexes(db);
 }
 
+/**
+ * Migration 11 — persist the "I left this group" marker.
+ *
+ * Groups use a soft leave (WhatsApp-style): the membership stays in place but
+ * `left_at` is set so the user can still read history yet is blocked from
+ * sending. The column is harmless for private chats (always NULL).
+ */
+async function migrationV11(db: SQLite.SQLiteDatabase): Promise<void> {
+  await ensureColumns(db, 'conversations', [
+    ['left_at', 'TEXT'],
+  ]);
+}
+
 const MIGRATIONS: MigrationStep[] = [
   MIGRATION_V1,
   migrationV2,
@@ -431,6 +446,7 @@ const MIGRATIONS: MigrationStep[] = [
   migrationV8,
   migrationV9,
   migrationV10,
+  migrationV11,
 ];
 
 async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {

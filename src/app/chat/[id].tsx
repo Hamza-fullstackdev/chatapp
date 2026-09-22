@@ -17,7 +17,7 @@ import {
 } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import Constants from 'expo-constants';
+import { StatusBar } from 'expo-status-bar';
 import * as Crypto from 'expo-crypto';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
@@ -29,7 +29,7 @@ import {
   useAudioRecorderState,
 } from 'expo-audio';
 import { useVideoPlayer, VideoView } from 'expo-video';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Image } from 'expo-image';
 import { useAuth } from '@/context/auth-context';
 import { useCalls } from '@/context/call-context';
@@ -60,6 +60,7 @@ import {
   upsertUserProfile as persistUserProfile,
   saveConversationMembers as persistConversationMembers,
   setConversationMeta as persistConversationMeta,
+  setConversationLeftAt as persistConversationLeftAt,
   type StoredProfile,
 } from '@/db/repositories';
 import { notifyLocalDb } from '@/lib/local-db-events';
@@ -185,6 +186,7 @@ export default function ChatScreen() {
   const { colors, dark } = useWaTheme();
   const { connected } = useSocket();
   const { startCall } = useCalls();
+  const insets = useSafeAreaInsets();
 
   const myId = user?.id ?? '';
 
@@ -351,6 +353,8 @@ export default function ChatScreen() {
   const { conversation } = detail ?? {};
   const conv = conversation ?? localConv;
   const isGroup = conv?.type === 'group';
+  // Soft leave: the user can still read the group but cannot send anything.
+  const hasLeft = isGroup && !!conv?.leftAt;
   const amAdmin = isGroup
     ? (detail?.members.some((m) => m.id === myId && m.role === 'admin') ?? false)
     : false;
@@ -723,6 +727,35 @@ export default function ChatScreen() {
         setTypingUsers((prev) => prev.filter((id) => id !== event.userId));
       }, 4000);
       typingTimers.current.set(event.userId, timer);
+    }
+  });
+
+  // If the current user is removed from the group while the chat is open, mark
+  // the conversation as left so the composer is replaced with a notice.
+  useSocketEvent<{ conversationId?: string; kind?: string; userId?: string }>('group:update', (event) => {
+    if (event.conversationId !== conversationId) return;
+    const removedMe =
+      event.kind === 'removed' ||
+      (event.kind === 'member_removed' && event.userId === myId);
+    if (removedMe) {
+      const leftAt = new Date().toISOString();
+      setLocalConv((prev) => (prev ? { ...prev, leftAt } : prev));
+      setDetail((prev) =>
+        prev ? { ...prev, conversation: { ...prev.conversation, leftAt } } : prev,
+      );
+      void (async () => {
+        const db = await getDb();
+        await persistConversationLeftAt(db, conversationId, leftAt);
+      })();
+    } else if (event.kind === 'member_added' && event.userId === myId) {
+      setLocalConv((prev) => (prev ? { ...prev, leftAt: null } : prev));
+      setDetail((prev) =>
+        prev ? { ...prev, conversation: { ...prev.conversation, leftAt: null } } : prev,
+      );
+      void (async () => {
+        const db = await getDb();
+        await persistConversationLeftAt(db, conversationId, null);
+      })();
     }
   });
 
@@ -1827,6 +1860,17 @@ export default function ChatScreen() {
           inverted
           keyExtractor={(m) => m.id}
           renderItem={({ item }) => {
+            // Server-authored group notices ("xyz has left the chat") render
+            // as a centered system row, not a user bubble.
+            if (item.type === 'system') {
+              return (
+                <View style={styles.systemRow}>
+                  <Text style={[styles.systemText, { color: colors.textSecondary }]}>
+                    {item.text}
+                  </Text>
+                </View>
+              );
+            }
             const ref = item.replyTo ? messageById.get(item.replyTo) ?? null : null;
             return (
               <MessageBubble
@@ -1878,7 +1922,7 @@ export default function ChatScreen() {
         )}
 
         {/* Reply / edit chip */}
-        {(replyTarget || editTarget) && (
+        {!hasLeft && (replyTarget || editTarget) && (
           <View style={[styles.chip, { backgroundColor: colors.incomingBubble }]}>
             <Ionicons
               name={editTarget ? 'create-outline' : 'arrow-undo'}
@@ -1933,7 +1977,15 @@ export default function ChatScreen() {
           </View>
         )}
 
-        {/* Input bar */}
+        {/* Input bar — replaced by a notice once the user has left the group */}
+        {hasLeft ? (
+          <View style={[styles.leftNotice, { backgroundColor: colors.incomingBubble }]}>
+            <Ionicons name="lock-closed" size={15} color={colors.textSecondary} />
+            <Text style={[styles.leftNoticeText, { color: colors.textSecondary }]}>
+              You can&apos;t send messages to this group because you left the group.
+            </Text>
+          </View>
+        ) : (
         <View style={[styles.inputBar, { backgroundColor: colors.incomingBubble }]}>
           {isRecording ? (
             <View
@@ -2064,6 +2116,7 @@ export default function ChatScreen() {
             </>
           )}
         </View>
+        )}
 
         {/* Emoji / GIF / sticker panel — inline so it pushes the input bar
             up (WhatsApp style) instead of covering it. */}
@@ -2162,7 +2215,7 @@ export default function ChatScreen() {
           <View
             style={[
               styles.menuCard,
-              { backgroundColor: colors.incomingBubble, top: (Constants.statusBarHeight ?? 0) + 52 },
+              { backgroundColor: colors.incomingBubble, top: insets.top + 52 },
             ]}
           >
             {headerMenuItems.map((item) => (
@@ -2359,6 +2412,7 @@ function MediaPreviewModal({
   onClose: () => void;
 }) {
   const { colors } = useWaTheme();
+  const insets = useSafeAreaInsets();
   return (
     <Modal
       visible
@@ -2366,8 +2420,9 @@ function MediaPreviewModal({
       onRequestClose={uploading ? () => undefined : onClose}
       statusBarTranslucent
     >
+      <StatusBar style="light" />
       <View style={[styles.previewOverlay, { backgroundColor: '#000000' }]}>
-        <View style={styles.previewHeader}>
+        <View style={[styles.previewHeader, { paddingTop: insets.top + 10 }]}>
           <Pressable hitSlop={10} onPress={onClose} disabled={uploading}>
             <Ionicons name="close" size={26} color="#FFFFFF" />
           </Pressable>
@@ -2383,7 +2438,7 @@ function MediaPreviewModal({
             <VideoPreviewUri uri={preview.uri} />
           )}
         </View>
-        <View style={styles.previewFooter}>
+        <View style={[styles.previewFooter, { paddingBottom: insets.bottom + 10 }]}>
           {onEdit && (
             <Pressable
               onPress={onEdit}
@@ -2479,10 +2534,12 @@ function MediaViewerModal({
 }) {
   // Offline-first viewer: uses the local cached file when available.
   // Images use expo-image; videos play fullscreen via expo-video.
+  const insets = useSafeAreaInsets();
   return (
     <Modal visible animationType="fade" onRequestClose={onClose} statusBarTranslucent>
+      <StatusBar style="light" />
       <View style={[styles.previewOverlay, { backgroundColor: '#000000' }]}>
-        <Pressable hitSlop={10} style={styles.viewerClose} onPress={onClose}>
+        <Pressable hitSlop={10} style={[styles.viewerClose, { top: insets.top + 8 }]} onPress={onClose}>
           <Ionicons name="close" size={28} color="#FFFFFF" />
         </Pressable>
         {attachment.type === 'video' ? (
@@ -2516,7 +2573,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 14,
-    paddingVertical: 10,
+    paddingBottom: 10,
   },
   previewTitle: { color: '#FFFFFF', fontSize: 16, fontWeight: '600' },
   previewBody: { flex: 1, justifyContent: 'center' },
@@ -2528,7 +2585,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 10,
     paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingTop: 10,
     backgroundColor: '#111111',
   },
   previewInput: { flex: 1, color: '#FFFFFF', fontSize: 16, padding: 0 },
@@ -2550,7 +2607,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  viewerClose: { position: 'absolute', top: 48, right: 14, zIndex: 2 },
+  viewerClose: { position: 'absolute', right: 14, zIndex: 2 },
   viewerLoading: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   center: {
     flex: 1,
@@ -2612,6 +2669,33 @@ const styles = StyleSheet.create({
   chipTextWrap: { flex: 1 },
   chipTitle: { fontSize: 12, fontWeight: '600' },
   chipBody: { fontSize: 12, marginTop: 1 },
+  leftNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginHorizontal: 10,
+    marginBottom: 8,
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  leftNoticeText: {
+    fontSize: 14,
+    fontWeight: '500',
+    textAlign: 'center',
+    flexShrink: 1,
+  },
+  systemRow: {
+    alignItems: 'center',
+    marginVertical: 8,
+    paddingHorizontal: 16,
+  },
+  systemText: {
+    fontSize: 13,
+    fontStyle: 'italic',
+    textAlign: 'center',
+  },
   inputBar: {
     flexDirection: 'row',
     alignItems: 'flex-end',

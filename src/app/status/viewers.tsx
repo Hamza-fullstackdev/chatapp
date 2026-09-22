@@ -9,6 +9,7 @@ import {
 } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Avatar } from '@/components/avatar';
 import { useWaTheme } from '@/context/theme-context';
 import { statusesApi } from '@/lib/api';
@@ -50,7 +51,7 @@ export default function StatusViewersScreen() {
   }, [params.id]);
 
   return (
-    <View style={[styles.safe, { backgroundColor: colors.background }]}>
+    <SafeAreaView edges={['top', 'bottom']} style={[styles.safe, { backgroundColor: colors.background }]}>
       <View style={[styles.header, { backgroundColor: colors.brandDark }]}>
         <Pressable hitSlop={10} onPress={() => router.back()} style={styles.headerBtn}>
           <Ionicons name="arrow-back" size={22} color="#FFFFFF" />
@@ -106,7 +107,7 @@ export default function StatusViewersScreen() {
           }
         />
       )}
-    </View>
+    </SafeAreaView>
   );
 }
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -7,29 +7,34 @@ import {
   StyleSheet,
   Text,
   View,
-} from 'react-native';
-import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { Image } from 'expo-image';
-import { useVideoPlayer, VideoView } from 'expo-video';
-import { Avatar } from '@/components/avatar';
-import { useAuth } from '@/context/auth-context';
-import { useWaTheme } from '@/context/theme-context';
-import { statusesApi } from '@/lib/api';
-import { getSignedUrl } from '@/lib/media';
-import { getDb } from '@/db/database';
+  type DimensionValue,
+} from "react-native";
+import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
+import { Ionicons } from "@expo/vector-icons";
+import { StatusBar } from "expo-status-bar";
+import {
+  SafeAreaView,
+  useSafeAreaInsets,
+} from "react-native-safe-area-context";
+import { Image } from "expo-image";
+import { useVideoPlayer, VideoView } from "expo-video";
+import { Avatar } from "@/components/avatar";
+import { useAuth } from "@/context/auth-context";
+import { useWaTheme } from "@/context/theme-context";
+import { statusesApi } from "@/lib/api";
+import { getSignedUrl } from "@/lib/media";
+import { getDb } from "@/db/database";
 import {
   listStatuses,
   setStatusViewedLocal,
   deleteStatusLocal,
   listUserProfiles,
   type StoredProfile,
-} from '@/db/repositories';
-import { formatStatusTime } from '@/lib/format';
-import { notifyLocalDb } from '@/lib/local-db-events';
-import { buildStatusQueue } from '@/hooks/use-status';
-import type { StatusDTO } from '@/types/api';
+} from "@/db/repositories";
+import { formatStatusTime } from "@/lib/format";
+import { notifyLocalDb } from "@/lib/local-db-events";
+import { buildStatusQueue } from "@/hooks/use-status";
+import type { StatusDTO } from "@/types/api";
 
 const AUTO_ADVANCE_MS = 5000;
 
@@ -37,21 +42,26 @@ export default function StatusViewerScreen() {
   const { colors } = useWaTheme();
   const { user } = useAuth();
   const params = useLocalSearchParams<{ id: string; mine?: string }>();
-  const currentId = params.id ?? '';
+  const currentId = params.id ?? "";
+  const insets = useSafeAreaInsets();
 
   const [statuses, setStatuses] = useState<StatusDTO[]>([]);
   const [current, setCurrent] = useState<StatusDTO | null>(null);
   const [paused, setPaused] = useState(false);
   const [url, setUrl] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
-  const [profiles, setProfiles] = useState<Map<string, StoredProfile>>(new Map());
+  const [profiles, setProfiles] = useState<Map<string, StoredProfile>>(
+    new Map(),
+  );
 
   const refresh = async () => {
     const db = await getDb();
     const all = await listStatuses(db);
-    if (params.mine === '1') {
+    if (params.mine === "1") {
       const mine = all.filter((s) => s.userId === user?.id);
-      setStatuses(mine.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt)));
+      setStatuses(
+        mine.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt)),
+      );
     } else {
       const startingStatus = all.find((s) => s.id === currentId);
       const queue = buildStatusQueue(all, startingStatus?.userId);
@@ -106,12 +116,14 @@ export default function StatusViewerScreen() {
   // Resolve signed media URL for image/video statuses.
   useEffect(() => {
     let active = true;
-    if (!current || current.type === 'text') {
+    if (!current || current.type === "text") {
       setUrl(null);
       return;
     }
     void (async () => {
-      const signed = await getSignedUrl(current.mediaPath ?? current.mediaThumbnailPath);
+      const signed = await getSignedUrl(
+        current.mediaPath ?? current.mediaThumbnailPath,
+      );
       if (!active) return;
       setUrl(signed);
     })();
@@ -120,12 +132,20 @@ export default function StatusViewerScreen() {
     };
   }, [current]);
 
+  const goBack = () => {
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace("/");
+    }
+  };
+
   const advance = (step: number) => {
     if (statuses.length === 0) return;
     const idx = statuses.findIndex((s) => s.id === current?.id);
     const next = idx + step;
     if (next < 0 || next >= statuses.length) {
-      router.back();
+      goBack();
       return;
     }
     // Update local URL search params to synchronize route and state
@@ -161,10 +181,18 @@ export default function StatusViewerScreen() {
   const remove = async () => {
     if (!current) return;
     const confirmed = await new Promise<boolean>((resolve) => {
-      Alert.alert('Delete status?', 'This status will be removed for everyone who can see it.', [
-        { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
-        { text: 'Delete', style: 'destructive', onPress: () => resolve(true) },
-      ]);
+      Alert.alert(
+        "Delete status?",
+        "This status will be removed for everyone who can see it.",
+        [
+          { text: "Cancel", style: "cancel", onPress: () => resolve(false) },
+          {
+            text: "Delete",
+            style: "destructive",
+            onPress: () => resolve(true),
+          },
+        ],
+      );
     });
     if (!confirmed) return;
     try {
@@ -174,24 +202,35 @@ export default function StatusViewerScreen() {
       notifyLocalDb();
       advance(1);
     } catch (e) {
-      Alert.alert('Could not delete', e instanceof Error ? e.message : 'Try again');
+      Alert.alert(
+        "Could not delete",
+        e instanceof Error ? e.message : "Try again",
+      );
     }
   };
 
   if (!current) {
     return (
-      <View style={[styles.safe, { backgroundColor: '#000000' }]}>
-        <ActivityIndicator size="large" color={colors.brand} style={{ marginTop: 'auto', marginBottom: 'auto' }} />
+      <View style={[styles.safe, { backgroundColor: "#000000" }]}>
+        <StatusBar style='light' />
+        <ActivityIndicator
+          size='large'
+          color={colors.brand}
+          style={{ marginTop: "auto", marginBottom: "auto" }}
+        />
       </View>
     );
   }
 
   const profile = profiles.get(current.userId);
-  const authorName = isMine ? 'My status' : (profile?.fullName ?? `@${current.userId.slice(0, 8)}…`);
+  const authorName = isMine
+    ? "My status"
+    : (profile?.fullName ?? `@${current.userId.slice(0, 8)}…`);
   const authorAvatar = isMine ? user?.avatarUrl : profile?.avatarUrl;
 
   return (
-    <View style={[styles.safe, { backgroundColor: '#000000' }]}>
+    <View style={[styles.safe, { backgroundColor: "#000000" }]}>
+      <StatusBar style='light' />
       <Pressable
         style={StyleSheet.absoluteFill}
         onPressIn={() => setPaused(true)}
@@ -199,87 +238,137 @@ export default function StatusViewerScreen() {
       />
 
       {/* Progress bars */}
-      <View style={styles.progressRow}>
+      <View style={[styles.progressRow, { top: insets.top + 8 }]}>
         {statuses.map((s, i) => {
           const currentIdx = statuses.findIndex((x) => x.id === current.id);
-          const width = i < currentIdx ? '100%' : i === currentIdx ? `${progress}%` : '0%';
+          const width: DimensionValue =
+            i < currentIdx ? "100%" : i === currentIdx ? `${progress}%` : "0%";
           return (
-            <View key={s.id} style={[styles.progressTrack, { backgroundColor: 'rgba(255,255,255,0.35)' }]}>
+            <View
+              key={s.id}
+              style={[
+                styles.progressTrack,
+                { backgroundColor: "rgba(255,255,255,0.35)" },
+              ]}
+            >
               <View style={[styles.progressActive, { width }]} />
             </View>
           );
         })}
       </View>
 
-      <SafeAreaView edges={['top', 'bottom']} style={styles.safeContainer}>
+      <SafeAreaView edges={["top", "bottom"]} style={styles.safeContainer}>
         <View style={styles.header}>
           <Avatar name={authorName} uri={authorAvatar} size={36} />
           <View style={{ marginLeft: 10, flex: 1 }}>
             <Text style={styles.authorName} numberOfLines={1}>
               {authorName}
             </Text>
-            <Text style={styles.authorTime}>{formatStatusTime(current.createdAt)}</Text>
+            <Text style={styles.authorTime}>
+              {formatStatusTime(current.createdAt)}
+            </Text>
           </View>
           {isMine && (
             <Pressable
               hitSlop={8}
-              onPress={() => router.push({ pathname: '/status/viewers', params: { id: current.id } })}
+              onPress={() =>
+                router.push({
+                  pathname: "/status/viewers",
+                  params: { id: current.id },
+                })
+              }
               style={styles.headerBtn}
             >
-              <Ionicons name="eye-outline" size={22} color="#FFFFFF" />
+              <Ionicons name='eye-outline' size={22} color='#FFFFFF' />
             </Pressable>
           )}
-          <Pressable hitSlop={8} onPress={() => router.back()} style={styles.headerBtn}>
-            <Ionicons name="close" size={26} color="#FFFFFF" />
+          <Pressable hitSlop={8} onPress={goBack} style={styles.headerBtn}>
+            <Ionicons name='close' size={26} color='#FFFFFF' />
           </Pressable>
         </View>
 
-        <Pressable style={styles.content}>
-          {current.type === 'text' ? (
-            <View style={[styles.textWrap, { backgroundColor: current.bgColor ?? '#00A884' }]}>
-              <Text style={[styles.textStatus, fontStyle(current.font)]}>{current.text}</Text>
-            </View>
-          ) : url ? (
-            current.type === 'video' ? (
-              <VideoStatus url={url} paused={paused} />
+        {/* Content stage: tap zones live here so they never cover header/footer */}
+        <View style={styles.stage}>
+          <Pressable
+            style={styles.content}
+            onPressIn={() => setPaused(true)}
+            onPressOut={() => setPaused(false)}
+          >
+            {current.type === "text" ? (
+              <View
+                style={[
+                  styles.textWrap,
+                  { backgroundColor: current.bgColor ?? "#00A884" },
+                ]}
+              >
+                <Text style={[styles.textStatus, fontStyle(current.font)]}>
+                  {current.text}
+                </Text>
+              </View>
+            ) : url ? (
+              current.type === "video" ? (
+                <VideoStatus url={url} paused={paused} />
+              ) : (
+                <Image
+                  source={{ uri: url }}
+                  style={styles.mediaFill}
+                  contentFit='contain'
+                />
+              )
             ) : (
-              <Image source={{ uri: url }} style={styles.mediaFill} contentFit="contain" />
-            )
-          ) : (
-            <ActivityIndicator size="large" color="#FFFFFF" />
-          )}
-        </Pressable>
+              <ActivityIndicator size='large' color='#FFFFFF' />
+            )}
+          </Pressable>
+
+          {/* Previous / next tap zones */}
+          <Pressable
+            style={styles.prevZone}
+            onPressIn={() => setPaused(true)}
+            onPressOut={() => setPaused(false)}
+            onPress={() => advance(-1)}
+          />
+          <Pressable
+            style={styles.nextZone}
+            onPressIn={() => setPaused(true)}
+            onPressOut={() => setPaused(false)}
+            onPress={() => advance(1)}
+          />
+        </View>
 
         <View style={styles.footer}>
           {isMine ? (
-            <Pressable onPress={() => void remove()} style={[styles.footerBtn, { borderColor: 'rgba(255,255,255,0.4)' }]}>
-              <Ionicons name="trash-outline" size={18} color="#FFFFFF" />
-              <Text style={styles.footerLabel}>Delete</Text>
-            </Pressable>
-          ) : (
-            <View style={[styles.footerBtn, { borderColor: 'rgba(255,255,255,0.25)' }]}>
-              <Ionicons name="lock-closed-outline" size={14} color="rgba(255,255,255,0.7)" />
-              <Text style={[styles.footerLabel, { color: 'rgba(255,255,255,0.8)' }]}>
-                {current.viewCount} view{current.viewCount === 1 ? '' : 's'}
-              </Text>
-            </View>
-          )}
+            <>
+              <Pressable
+                onPress={() =>
+                  router.push({
+                    pathname: "/status/viewers",
+                    params: { id: current.id },
+                  })
+                }
+                style={[
+                  styles.footerBtn,
+                  { borderColor: "rgba(255,255,255,0.4)" },
+                ]}
+              >
+                <Ionicons name='eye-outline' size={16} color='#FFFFFF' />
+                <Text style={styles.footerLabel}>
+                  {current.viewCount} view{current.viewCount === 1 ? "" : "s"}
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={() => void remove()}
+                style={[
+                  styles.footerBtn,
+                  { borderColor: "rgba(255,255,255,0.4)" },
+                ]}
+              >
+                <Ionicons name='trash-outline' size={18} color='#FFFFFF' />
+                <Text style={styles.footerLabel}>Delete</Text>
+              </Pressable>
+            </>
+          ) : null}
         </View>
       </SafeAreaView>
-
-      {/* Previous / next tap zones */}
-      <Pressable
-        style={styles.prevZone}
-        onPressIn={() => setPaused(true)}
-        onPressOut={() => setPaused(false)}
-        onPress={() => advance(-1)}
-      />
-      <Pressable
-        style={styles.nextZone}
-        onPressIn={() => setPaused(true)}
-        onPressOut={() => setPaused(false)}
-        onPress={() => advance(1)}
-      />
     </View>
   );
 }
@@ -309,21 +398,28 @@ function VideoStatus({ url, paused }: { url: string; paused: boolean }) {
     <VideoView
       player={player}
       style={styles.mediaFill}
-      contentFit="contain"
+      contentFit='contain'
       nativeControls={false}
-      surfaceType={Platform.OS === 'android' ? 'textureView' : undefined}
+      surfaceType={Platform.OS === "android" ? "textureView" : undefined}
     />
   );
 }
 
-function fontStyle(font: string | null): { fontFamily?: string; fontWeight?: '400' | '500' } {
+function fontStyle(font: string | null): {
+  fontFamily?: string;
+  fontWeight?: "400" | "500";
+} {
   switch (font) {
-    case 'Serif':
-      return { fontFamily: Platform.select({ ios: 'Georgia', android: 'serif' }) };
-    case 'Monospace':
-      return { fontFamily: Platform.select({ ios: 'Courier', android: 'monospace' }) };
+    case "Serif":
+      return {
+        fontFamily: Platform.select({ ios: "Georgia", android: "serif" }),
+      };
+    case "Monospace":
+      return {
+        fontFamily: Platform.select({ ios: "Courier", android: "monospace" }),
+      };
     default:
-      return { fontWeight: '500' };
+      return { fontWeight: "500" };
   }
 }
 
@@ -331,41 +427,70 @@ const styles = StyleSheet.create({
   safe: { flex: 1 },
   safeContainer: { flex: 1 },
   progressRow: {
-    flexDirection: 'row',
+    flexDirection: "row",
     gap: 3,
-    position: 'absolute',
-    top: 8,
+    position: "absolute",
     left: 8,
     right: 8,
     zIndex: 5,
   },
-  progressTrack: { flex: 1, height: 2.5, borderRadius: 2, overflow: 'hidden' },
-  progressActive: { height: '100%', backgroundColor: '#FFFFFF' },
+  progressTrack: { flex: 1, height: 2.5, borderRadius: 2, overflow: "hidden" },
+  progressActive: { height: "100%", backgroundColor: "#FFFFFF" },
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     paddingHorizontal: 12,
     paddingTop: 24,
     zIndex: 4,
   },
   headerBtn: { padding: 10 },
-  authorName: { color: '#FFFFFF', fontSize: 15, fontWeight: '600' },
-  authorTime: { color: 'rgba(255,255,255,0.7)', fontSize: 12, marginTop: 1 },
+  authorName: { color: "#FFFFFF", fontSize: 15, fontWeight: "600" },
+  authorTime: { color: "rgba(255,255,255,0.7)", fontSize: 12, marginTop: 1 },
+  stage: { flex: 1 },
   content: { flex: 1 },
-  textWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 28 },
-  textStatus: { color: '#FFFFFF', fontSize: 30, textAlign: 'center', lineHeight: 40 },
-  mediaFill: { flex: 1, width: '100%' },
-  footer: { alignItems: 'center', paddingBottom: 16, zIndex: 4 },
+  textWrap: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 28,
+  },
+  textStatus: {
+    color: "#FFFFFF",
+    fontSize: 30,
+    textAlign: "center",
+    lineHeight: 40,
+  },
+  mediaFill: { flex: 1, width: "100%" },
+  footer: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    paddingBottom: 16,
+    zIndex: 4,
+  },
   footerBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     gap: 6,
     borderWidth: 1,
     borderRadius: 18,
     paddingHorizontal: 14,
     paddingVertical: 7,
   },
-  footerLabel: { color: '#FFFFFF', fontSize: 13 },
-  prevZone: { position: 'absolute', left: 0, top: 0, width: '30%', height: '100%', zIndex: 6 },
-  nextZone: { position: 'absolute', right: 0, top: 0, width: '30%', height: '100%', zIndex: 6 },
+  footerLabel: { color: "#FFFFFF", fontSize: 13 },
+  prevZone: {
+    position: "absolute",
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: "30%",
+  },
+  nextZone: {
+    position: "absolute",
+    right: 0,
+    top: 0,
+    bottom: 0,
+    width: "30%",
+  },
 });

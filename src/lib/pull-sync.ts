@@ -120,7 +120,7 @@ async function applyChange(
         const id = String(payload.statusId ?? change.entityId);
         await deleteStatusLocal(db, id);
       } else if (typeof payload.id === 'string') {
-        await upsertStatus(db, payload as import('@/types/api').StatusDTO);
+        await upsertStatus(db, payload as unknown as import('@/types/api').StatusDTO);
       }
       notifyLocalDb();
       return;

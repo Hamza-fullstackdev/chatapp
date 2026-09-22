@@ -10,7 +10,8 @@ import {
 } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { StatusBar } from 'expo-status-bar';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Image } from 'expo-image';
 import { useWaTheme } from '@/context/theme-context';
 import { conversationsApi, usersApi } from '@/lib/api';
@@ -24,6 +25,7 @@ export default function UserProfileScreen() {
   const params = useLocalSearchParams<{ id: string }>();
   const userId = String(params.id ?? '');
   const { colors } = useWaTheme();
+  const insets = useSafeAreaInsets();
 
   const [profile, setProfile] = useState<UserDTO | null>(null);
   const [loading, setLoading] = useState(true);
@@ -149,8 +151,13 @@ export default function UserProfileScreen() {
 
       {viewingPhoto && profile?.avatarUrl && (
         <Modal visible animationType="fade" onRequestClose={() => setViewingPhoto(false)} statusBarTranslucent>
+          <StatusBar style="light" />
           <View style={[styles.photoOverlay, { backgroundColor: '#000000' }]}>
-            <Pressable hitSlop={10} style={styles.photoClose} onPress={() => setViewingPhoto(false)}>
+            <Pressable
+              hitSlop={10}
+              style={[styles.photoClose, { top: insets.top + 8 }]}
+              onPress={() => setViewingPhoto(false)}
+            >
               <Ionicons name="close" size={28} color="#FFFFFF" />
             </Pressable>
             <Image source={{ uri: profile.avatarUrl }} style={styles.photo} contentFit="contain" transition={150} />
@@ -217,6 +224,6 @@ const styles = StyleSheet.create({
   rowLabel: { fontSize: 15, fontWeight: '600', width: 64 },
   rowValue: { flex: 1, fontSize: 14, textAlign: 'right' },
   photoOverlay: { flex: 1 },
-  photoClose: { position: 'absolute', top: 54, right: 20, zIndex: 2, padding: 6 },
+  photoClose: { position: 'absolute', right: 20, zIndex: 2, padding: 6 },
   photo: { width: '100%', height: '100%' },
 });

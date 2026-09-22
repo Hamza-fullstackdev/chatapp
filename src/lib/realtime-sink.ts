@@ -12,6 +12,7 @@ import {
   markMessagesDeliveredThrough,
   markMessagesReadThrough,
   refreshConversationFromMessage,
+  setConversationLeftAt,
   setMessageReactions,
   touchUserProfile,
   upsertMessage,
@@ -97,10 +98,12 @@ export function installRealtimeHandlers(socket: Socket, currentUserId: string): 
         sendMessageReceived(message.conversationId, message.id);
       }
 
-      // Banner the incoming message (WhatsApp-style): skip our own echoes and
-      // whatever conversation we are currently reading on screen.
+      // Banner the incoming message (WhatsApp-style): skip our own echoes,
+      // whatever conversation we are currently reading on screen, and
+      // scripted server notices (e.g. "X has left the chat").
       if (message.senderId === currentUserId) return;
       if (message.conversationId === getActiveConversationId()) return;
+      if (message.type === 'system') return;
       void notifyIncomingMessage(db, message);
     });
   };
@@ -196,6 +199,41 @@ export function installRealtimeHandlers(socket: Socket, currentUserId: string): 
     });
   };
 
+  /**
+   * Soft-removal from a group. When the current user leaves / is removed, the
+   * server emits `group:update` with kind 'removed' (to the member) and
+   * 'member_removed' (to the room, carrying the userId). Mark the local
+   * conversation left_at so the composer hides and a "you left" notice shows
+   * without waiting for the next full refresh. Re-add clears it via the
+   * regular details sync, and only the affected conversation changes.
+   */
+  const onGroupUpdate = (event: {
+    conversationId?: string;
+    kind?: string;
+    userId?: string;
+  }) => {
+    const conversationId = event?.conversationId;
+    if (!conversationId) return;
+    const removedMe =
+      event?.kind === 'removed' ||
+      (event?.kind === 'member_removed' && event.userId === currentUserId);
+    if (!removedMe) {
+      // Re-added (left_at cleared server-side): restore the composer locally.
+      if (event?.kind === 'member_added' && event.userId === currentUserId) {
+        run(async () => {
+          await setConversationLeftAt(await getDb(), conversationId, null);
+          notifyLocalDb();
+        });
+      }
+      return;
+    }
+    run(async () => {
+      const db = await getDb();
+      await setConversationLeftAt(db, conversationId, new Date().toISOString());
+      notifyLocalDb();
+    });
+  };
+
   socket.on('message:new', onMessageNew);
   socket.on('message:update', onMessageUpdate);
   socket.on('message:delete', onMessageDelete);
@@ -206,6 +244,7 @@ export function installRealtimeHandlers(socket: Socket, currentUserId: string): 
   socket.on('status:new', onStatusNew);
   socket.on('status:delete', onStatusDelete);
   socket.on('status:view', onStatusView);
+  socket.on('group:update', onGroupUpdate);
 
   return () => {
     socket.off('message:new', onMessageNew);
@@ -218,5 +257,6 @@ export function installRealtimeHandlers(socket: Socket, currentUserId: string): 
     socket.off('status:new', onStatusNew);
     socket.off('status:delete', onStatusDelete);
     socket.off('status:view', onStatusView);
+    socket.off('group:update', onGroupUpdate);
   };
 }

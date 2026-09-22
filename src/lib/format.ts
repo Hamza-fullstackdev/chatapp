@@ -90,6 +90,10 @@ export function previewText(type: string, text: string | null, senderName?: stri
       return `${prefix}GIF`;
     case 'file':
       return `${prefix}Document`;
+    case 'system':
+      // Server-authored notices ("X has left the chat") never take a sender
+      // prefix — the name is already in the text.
+      return text ?? '';
     default:
       return `${prefix}${text ?? ''}`;
   }

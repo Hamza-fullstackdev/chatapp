@@ -111,8 +111,9 @@ export async function upsertConversation(db: SQLiteDatabase, c: ConversationDTO)
       `INSERT INTO conversations (
         id, type, name, avatar_url, other_user_id, other_user_name, other_user_avatar_url,
         last_message_id, last_message_type, last_message_text, last_message_sender_id,
-        last_message_status, last_message_created_at, last_message_has_attachments, unread_count, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        last_message_status, last_message_created_at, last_message_has_attachments, unread_count, updated_at,
+        left_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       c.id,
       c.type,
       c.name,
@@ -129,6 +130,7 @@ export async function upsertConversation(db: SQLiteDatabase, c: ConversationDTO)
       c.lastMessage?.hasAttachments ? 1 : 0,
       c.unreadCount ?? 0,
       c.updatedAt,
+      c.leftAt ?? null,
     );
     return;
   }
@@ -140,6 +142,7 @@ export async function upsertConversation(db: SQLiteDatabase, c: ConversationDTO)
     'other_user_id = ?',
     'other_user_name = ?',
     'other_user_avatar_url = ?',
+    'left_at = ?',
   ];
   const params: (string | number | null)[] = [
     c.type,
@@ -148,6 +151,7 @@ export async function upsertConversation(db: SQLiteDatabase, c: ConversationDTO)
     c.otherUserId,
     c.otherUserName,
     c.otherUserAvatarUrl,
+    c.leftAt ?? null,
   ];
 
   if (!keepLocalLast) {
@@ -229,7 +233,7 @@ export async function listConversations(db: SQLiteDatabase, currentUserId: strin
       c.other_user_avatar_url, c.last_message_id, c.last_message_type,
       c.last_message_text, c.last_message_sender_id, c.last_message_created_at,
       c.last_message_status, c.last_message_has_attachments, c.updated_at,
-      c.member_count, c.is_group_admin,
+      c.member_count, c.is_group_admin, c.left_at,
       (
         SELECT COUNT(*) FROM messages m
         WHERE m.conversation_id = c.id
@@ -267,6 +271,16 @@ export async function setConversationMeta(
   if (meta.isGroupAdmin != null) {
     await db.runAsync('UPDATE conversations SET is_group_admin = ? WHERE id = ?', meta.isGroupAdmin ? 1 : 0, id);
   }
+}
+
+/**
+ * Persist the "I left this group" timestamp locally. The chat screen hides the
+ * composer (and shows a notice) as soon as left_at is present. API list calls
+ * already carry leftAt; this is mostly for realtime removal events so the UI
+ * reacts without waiting for the next refresh. Pass null to clear (re-added).
+ */
+export async function setConversationLeftAt(db: SQLiteDatabase, id: string, leftAt: string | null): Promise<void> {
+  await db.runAsync('UPDATE conversations SET left_at = ? WHERE id = ?', leftAt, id);
 }
 
 export async function markConversationRead(db: SQLiteDatabase, id: string): Promise<void> {

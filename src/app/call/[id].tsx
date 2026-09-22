@@ -3,7 +3,8 @@ import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 import { RTCView, type MediaStream, type RTCPeerConnection } from 'react-native-webrtc';
 import { router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { StatusBar } from 'expo-status-bar';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useSocketEvent } from '@/context/socket-context';
 import { callsApi } from '@/lib/api';
 import { sendCallSignal } from '@/lib/socket';
@@ -39,6 +40,7 @@ export default function CallScreen() {
   const params = useLocalSearchParams<{ id: string; type?: string }>();
   const callId = String(params.id ?? '');
   const callType = String(params.type ?? 'voice');
+  const insets = useSafeAreaInsets();
 
   const [call, setCall] = useState<CallDTO | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
@@ -326,6 +328,7 @@ export default function CallScreen() {
 
   return (
     <SafeAreaView edges={['top', 'bottom']} style={[styles.safe, { backgroundColor: '#0B141A' }]}>
+      <StatusBar style="light" />
       {isVideo && showPeer && remoteStream ? (
         <RTCView
           streamURL={remoteStream.toURL()}
@@ -344,7 +347,7 @@ export default function CallScreen() {
       {isVideo && localStream && (
         <RTCView
           streamURL={localStream.toURL()}
-          style={styles.localVideo}
+          style={[styles.localVideo, { top: insets.top + 12 }]}
           objectFit="cover"
           mirror
           zOrder={1}
@@ -391,7 +394,6 @@ const styles = StyleSheet.create({
 
   localVideo: {
     position: 'absolute',
-    top: 50,
     right: 16,
     width: 110,
     height: 150,

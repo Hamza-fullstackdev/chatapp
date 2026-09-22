@@ -9,6 +9,7 @@ import {
 } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Avatar } from '@/components/avatar';
 import { useAuth } from '@/context/auth-context';
 import { useWaTheme } from '@/context/theme-context';
@@ -59,8 +60,8 @@ export default function AudienceScreen() {
         ? include.includes(id)
         : false;
 
-  const save = () => {
-    setStatusAudience({
+  const save = async () => {
+    await setStatusAudience({
       audience,
       excludeUserIds: audience === 'my_contacts_except' ? exclude : [],
       includeUserIds: audience === 'only_share_with' ? include : [],
@@ -69,13 +70,13 @@ export default function AudienceScreen() {
   };
 
   return (
-    <View style={[styles.safe, { backgroundColor: colors.background }]}>
+    <SafeAreaView edges={['top', 'bottom']} style={[styles.safe, { backgroundColor: colors.background }]}>
       <View style={[styles.header, { backgroundColor: colors.brandDark }]}>
         <Pressable hitSlop={10} onPress={() => router.back()} style={styles.headerBtn}>
           <Ionicons name="close" size={24} color="#FFFFFF" />
         </Pressable>
         <Text style={styles.headerTitle}>Audience</Text>
-        <Pressable hitSlop={10} onPress={save} style={styles.headerBtn}>
+        <Pressable hitSlop={10} onPress={() => void save()} style={styles.headerBtn}>
           <Text style={styles.doneLabel}>DONE</Text>
         </Pressable>
       </View>
@@ -158,7 +159,7 @@ export default function AudienceScreen() {
           </Text>
         </View>
       )}
-    </View>
+    </SafeAreaView>
   );
 }
 

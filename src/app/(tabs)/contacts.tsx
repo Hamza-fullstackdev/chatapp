@@ -113,6 +113,18 @@ export default function ContactsScreen() {
         </View>
       </View>
 
+      <Pressable
+        onPress={() => router.push('/group/new')}
+        style={({ pressed }) => [
+          styles.newGroupBtn,
+          { backgroundColor: pressed ? '#00806b' : colors.brand },
+        ]}
+      >
+        <Ionicons name="people" size={22} color="#FFFFFF" />
+        <Text style={styles.newGroupText}>New group</Text>
+        <Ionicons name="chevron-forward" size={18} color="rgba(255,255,255,0.85)" />
+      </Pressable>
+
       {loading && users == null ? (
         <View style={styles.center}>
           <ActivityIndicator size="large" color={colors.brand} />
@@ -167,6 +179,21 @@ const styles = StyleSheet.create({
     flex: 1,
     marginLeft: 8,
     fontSize: 15,
+  },
+  newGroupBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginHorizontal: 12,
+    marginBottom: 4,
+    paddingVertical: 13,
+    borderRadius: 12,
+    gap: 8,
+  },
+  newGroupText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '600',
   },
   listContent: {
     paddingVertical: 4,
