@@ -17,6 +17,7 @@ import { useWaTheme } from '@/context/theme-context';
 import { useConversations } from '@/hooks/use-data';
 import { useLocalDb } from '@/lib/local-db-events';
 import { useSyncDb } from '@/context/sync-context';
+import { usePresence } from '@/lib/presence';
 import { ConversationItem } from '@/components/conversation-item';
 import { conversationsApi } from '@/lib/api';
 import { getDb } from '@/db/database';
@@ -42,6 +43,7 @@ function HeaderRight() {
 export default function ChatsScreen() {
   const { user } = useAuth();
   const { colors, dark } = useWaTheme();
+  const presence = usePresence();
   const { data: apiConversations, loading, error, refresh } = useConversations(user?.id ?? '', true);
 
   // SQLite-first: the conversation list renders from the local cache so chats
@@ -147,6 +149,7 @@ export default function ChatsScreen() {
     <ConversationItem
       conversation={item}
       currentUserId={user?.id ?? ''}
+      online={item.type === 'private' && item.otherUserId ? presence.has(item.otherUserId) : false}
       selecting={selectMode}
       selected={selected.has(item.id)}
       onPress={(id) => {

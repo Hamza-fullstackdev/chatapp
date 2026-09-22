@@ -6,7 +6,7 @@ import { Image } from 'expo-image';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useWaTheme } from '@/context/theme-context';
 import { authApi } from '@/lib/api';
-import { setAuthToken } from '@/lib/api-client';
+import { setAuthToken, ApiError } from '@/lib/api-client';
 import { pickAvatarImage, uploadAvatar, type LocalUploadSource } from '@/lib/media';
 
 export default function RegisterScreen() {
@@ -62,7 +62,14 @@ export default function RegisterScreen() {
       }
       router.replace('/login');
     } catch (e) {
-      Alert.alert('Registration failed', e instanceof Error ? e.message : 'Could not create account');
+      if (e instanceof ApiError && (e.code === 'CONFLICT' || e.status === 409)) {
+        Alert.alert(
+          'Username already taken',
+          'That username already exists. Please try a different username.',
+        );
+      } else {
+        Alert.alert('Registration failed', e instanceof Error ? e.message : 'Could not create account');
+      }
     } finally {
       setBusy(false);
     }

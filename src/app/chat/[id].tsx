@@ -35,10 +35,11 @@ import { useAuth } from '@/context/auth-context';
 import { useCalls } from '@/context/call-context';
 import { useWaTheme } from '@/context/theme-context';
 import { useSocket, useSocketEvent } from '@/context/socket-context';
-import { enqueueOp, useSync, useSyncDb, useSyncFlush } from '@/context/sync-context';
+import { enqueueOp, useSyncDb, useSyncFlush } from '@/context/sync-context';
 import { setActiveConversationId } from '@/lib/active-conversation';
 import { conversationsApi, messagesApi, stickersApi } from '@/lib/api';
 import { ApiError } from '@/lib/api-client';
+import { formatLastSeen } from '@/lib/format';
 import { joinConversation, leaveConversation, sendMessageRead, sendTyping } from '@/lib/socket';
 import { getDb } from '@/db/database';
 import {
@@ -50,8 +51,10 @@ import {
   setMessageReactions as persistReactions,
   deleteMessageRow as persistDelete,
   deleteMessagesLocal as persistDeleteMany,
+  deleteMessageRowsByClientIdExcept as persistDropPlaceholder,
   markMessagesDeliveredThrough as persistDelivered,
   markMessagesReadThrough as persistRead,
+  refreshConversationFromMessage,
   upsertMessage as persistMessage,
   upsertConversation as persistConversation,
   upsertUserProfile as persistUserProfile,
@@ -59,10 +62,12 @@ import {
   setConversationMeta as persistConversationMeta,
   type StoredProfile,
 } from '@/db/repositories';
+import { notifyLocalDb } from '@/lib/local-db-events';
 import { uploadAsset, fileNameFromUri } from '@/lib/media';
 import { useAttachmentSource, prewarmConversationMedia } from '@/lib/media-cache';
 import { MessageBubble } from '@/components/message-bubble';
 import { MessageActionsSheet } from '@/components/message-actions-sheet';
+import { ReactionsSheet, type ReactionUserInfo } from '@/components/reactions-sheet';
 import { Avatar } from '@/components/avatar';
 import { BUILTIN_GIFS, BUILTIN_STICKERS } from '@/constants/media-sources';
 import { EMOJIS, EMOJI_GROUPS, type EmojiEntry } from '@/constants/emojis';
@@ -73,7 +78,6 @@ import type {
   MessageDTO,
   MessageDeliveredEvent,
   MessageReadEvent,
-  PresenceUpdateEvent,
   TypingUpdateEvent,
 } from '@/types/api';
 
@@ -87,6 +91,8 @@ interface DraftAttachment {
   gifUrl?: string;
   previewUrl?: string;
   provider?: string;
+  fileName?: string;
+  size?: number;
   localUri?: string;
 }
 
@@ -178,7 +184,6 @@ export default function ChatScreen() {
   const { user } = useAuth();
   const { colors, dark } = useWaTheme();
   const { connected } = useSocket();
-  const { pendingCount } = useSync();
   const { startCall } = useCalls();
 
   const myId = user?.id ?? '';
@@ -200,7 +205,6 @@ export default function ChatScreen() {
 
   const [draft, setDraft] = useState('');
   const [typingUsers, setTypingUsers] = useState<string[]>([]);
-  const [peers, setPeers] = useState<Record<string, boolean>>({});
 
   // Offline identity cache: sender names resolve from SQLite so group chats
   // render correctly even when the detail API call fails.
@@ -209,6 +213,7 @@ export default function ChatScreen() {
   const [replyTarget, setReplyTarget] = useState<MessageDTO | null>(null);
   const [editTarget, setEditTarget] = useState<MessageDTO | null>(null);
   const [actionTarget, setActionTarget] = useState<MessageDTO | null>(null);
+  const [reactionsTargetId, setReactionsTargetId] = useState<string | null>(null);
 
   const [selectMessages, setSelectMessages] = useState(false);
   const [selectedMessageIds, setSelectedMessageIds] = useState<Set<string>>(new Set());
@@ -350,13 +355,16 @@ export default function ChatScreen() {
     ? (detail?.members.some((m) => m.id === myId && m.role === 'admin') ?? false)
     : false;
   const otherUserId = conv?.otherUserId ?? null;
-  const peerOnline = otherUserId ? peers[otherUserId] === true : false;
 
   const messageById = useMemo(() => {
     const map = new Map<string, MessageDTO>();
     for (const m of messages) map.set(m.id, m);
     return map;
   }, [messages]);
+
+  // Live reactions target: re-derive from the message map so the sheet stays
+  // in sync with socket / optimistic reaction updates while it is open.
+  const reactionsTarget = reactionsTargetId ? messageById.get(reactionsTargetId) ?? null : null;
 
   // A message can be deleted "for everyone" only by its sender (or any
   // message by a group admin). Mirrors the server-side permission rule so a
@@ -372,13 +380,9 @@ export default function ChatScreen() {
   const title = isGroup
     ? conv?.name ?? 'Group'
     : conv?.otherUserName ?? 'Chat';
-  const subtitle = pendingCount > 0
-    ? `${pendingCount} pending…`
-    : isGroup
-      ? `${detail?.members.length ?? 0} members`
-      : peerOnline
-        ? 'online'
-        : 'last seen recently';
+  const subtitle = isGroup
+    ? `${detail?.members.length ?? 0} members`
+    : formatLastSeen(otherUserId ? (profiles.get(otherUserId)?.lastSeenAt ?? null) : null);
 
   // Tap the header name (or DP / ⋮) to open the peer's profile; groups open
   // their info screen.
@@ -574,6 +578,12 @@ export default function ChatScreen() {
     void (async () => {
       const db = await getDb();
       await persistMessage(db, message);
+      await persistDropPlaceholder(db, message.clientMessageId ?? message.id, message.id);
+      await refreshConversationFromMessage(db, message, {
+        currentUserId: myId,
+        activeConversationId: conversationId,
+      });
+      notifyLocalDb();
     })();
   };
 
@@ -697,10 +707,6 @@ export default function ChatScreen() {
     })();
   });
 
-  useSocketEvent<PresenceUpdateEvent>('presence:update', (event) => {
-    setPeers((prev) => ({ ...prev, [event.userId]: event.online }));
-  });
-
   useSocketEvent<TypingUpdateEvent>('typing:update', (event) => {
     if (event.conversationId !== conversationId || event.userId === myId) return;
     setTypingUsers((prev) => {
@@ -742,6 +748,7 @@ export default function ChatScreen() {
     inFlightSends.add(sig);
     const optimistic = attachToDto(conversationId, myId, cid, draft);
     addOptimistic(optimistic);
+    persist(optimistic);
     if (!draft.attachment) setDraft('');
     setReplyTarget(null);
     sendTyping(conversationId, false);
@@ -905,10 +912,14 @@ export default function ChatScreen() {
           ? {
               type: message.attachments[0].type,
               storagePath: message.attachments[0].storagePath ?? undefined,
+              mimeType: message.attachments[0].mimeType ?? undefined,
+              width: message.attachments[0].width ?? undefined,
+              height: message.attachments[0].height ?? undefined,
               durationMs: message.attachments[0].durationMs ?? undefined,
               gifUrl: message.attachments[0].gifUrl ?? undefined,
               previewUrl: message.attachments[0].previewUrl ?? undefined,
               provider: message.attachments[0].provider ?? undefined,
+              localUri: message.attachments[0].localUri ?? undefined,
             }
           : undefined,
       },
@@ -1017,6 +1028,26 @@ export default function ChatScreen() {
       return;
     }
     const durationMs = Math.max(0, Math.round(secs * 1000));
+    // Register the pending bubble (local audio + spinner) before the upload so
+    // offline sends stay visible; a failed upload keeps it and queues retry.
+    const cid = Crypto.randomUUID();
+    const optimistic = attachToDto(
+      conversationId,
+      myId,
+      cid,
+      {
+        type: 'audio',
+        attachment: {
+          type: 'audio',
+          mimeType: 'audio/mp4',
+          durationMs,
+          localUri: uri,
+        },
+      },
+      'pending',
+    );
+    addOptimistic(optimistic);
+    persist(optimistic);
     setUploading(true);
     try {
       const uploaded = await uploadAsset(
@@ -1029,15 +1060,46 @@ export default function ChatScreen() {
         },
         { durationMs },
       );
-      await send({
-        type: 'audio',
-        attachment: {
-          ...uploaded.attachment,
-          localUri: uri,
+      await send(
+        {
+          type: 'audio',
+          attachment: {
+            ...uploaded.attachment,
+            durationMs,
+            localUri: uri,
+          },
         },
-      });
+        cid,
+      );
     } catch (e) {
-      Alert.alert('Send failed', e instanceof Error ? e.message : 'Could not upload the voice message.');
+      if (isRetryableError(e)) {
+        // Offline: keep the pending bubble and queue delivery for reconnect.
+        persist(optimistic);
+        void enqueueOp({
+          opId: cid,
+          type: 'CREATE_MESSAGE',
+          clientMessageId: cid,
+          conversationId,
+          payload: {
+            type: 'audio',
+            attachment: {
+              type: 'audio',
+              mimeType: 'audio/mp4',
+              durationMs,
+              localUri: uri,
+            },
+          },
+          createdAt: optimistic.createdAt,
+        });
+      } else {
+        setBase((prev) =>
+          prev.map((m) => (m.id === cid ? { ...m, status: 'failed' } : m)),
+        );
+        setOptimistic((prev) =>
+          prev.map((o) => (o.id === cid ? { ...o, status: 'failed' } : o)),
+        );
+        Alert.alert('Send failed', e instanceof Error ? e.message : 'Could not upload the voice message.');
+      }
     } finally {
       setUploading(false);
     }
@@ -1216,6 +1278,32 @@ export default function ChatScreen() {
   const isReacted = (message: MessageDTO, emoji: string) =>
     message.reactions.some((r) => r.userId === myId && r.emoji === emoji);
 
+  // Resolve a reaction author to a displayable identity (avatar + name) from
+  // the conversation members / offline profile cache, marking yourself as
+  // "You" like WhatsApp does.
+  const resolveReactionUser = useMemo(() => {
+    return (userId: string): ReactionUserInfo => {
+      if (userId === myId) {
+        return {
+          id: myId,
+          name: user?.fullName || 'You',
+          username: user?.username ?? '',
+          avatarUrl: user?.avatarUrl ?? null,
+          isMe: true,
+        };
+      }
+      const member = detail?.members.find((m) => m.id === userId);
+      const profile = profiles.get(userId);
+      return {
+        id: userId,
+        name: member?.name ?? profile?.fullName ?? 'Unknown',
+        username: member?.username ?? profile?.username ?? '',
+        avatarUrl: member?.avatarUrl ?? profile?.avatarUrl ?? null,
+        isMe: false,
+      };
+    };
+  }, [myId, user, detail, profiles]);
+
   // ------------------------------------------------------------------
   // Multi-select / bulk delete
   // ------------------------------------------------------------------
@@ -1224,6 +1312,13 @@ export default function ChatScreen() {
     setSelectedMessageIds(new Set([message.id]));
     setSelectMessages(false);
     setActionTarget(message);
+  };
+
+  const openReactions = (message: MessageDTO) => {
+    Keyboard.dismiss();
+    setActionTarget(null);
+    if (!selectMessages) setSelectedMessageIds(new Set());
+    setReactionsTargetId(message.id);
   };
 
   const toggleMessageSelected = (message: MessageDTO) => {
@@ -1438,28 +1533,32 @@ export default function ChatScreen() {
     const target = editTarget;
 
     // New media: register the pending bubble (local image + progress spinner)
-    // instantly so the upload state is visible, like WhatsApp.
+    // instantly so the upload state is visible, like WhatsApp. The optimistic
+    // copy is persisted so it survives navigation and shows on the Chats tab,
+    // and a failed upload keeps it until the next flush retries delivery.
     const cid = Crypto.randomUUID();
+    let optimistic: MessageDTO | null = null;
     if (!target) {
-      addOptimistic(
-        attachToDto(
-          conversationId,
-          myId,
-          cid,
-          {
-            text: previewCaption.trim() || undefined,
+      optimistic = attachToDto(
+        conversationId,
+        myId,
+        cid,
+        {
+          text: previewCaption.trim() || undefined,
+          replyTo: replyTarget?.id,
+          type,
+          attachment: {
             type,
-            attachment: {
-              type,
-              mimeType: item.mimeType,
-              width: item.width,
-              height: item.height,
-              localUri: item.uri,
-            },
+            mimeType: item.mimeType,
+            width: item.width,
+            height: item.height,
+            localUri: item.uri,
           },
-          'pending',
-        ),
+        },
+        'pending',
       );
+      addOptimistic(optimistic);
+      persist(optimistic);
     }
 
     setUploading(true);
@@ -1483,6 +1582,7 @@ export default function ChatScreen() {
         await send(
           {
             text: previewCaption.trim() || undefined,
+            replyTo: replyTarget?.id,
             type,
             attachment,
           },
@@ -1491,10 +1591,42 @@ export default function ChatScreen() {
       }
       closePreview();
     } catch (e) {
-      if (!target) {
-        setOptimistic((prev) => prev.filter((o) => o.clientMessageId !== cid));
+      if (!target && optimistic) {
+        if (isRetryableError(e)) {
+          // Offline: keep the pending bubble and queue delivery. The sync
+          // engine uploads the local file and sends the message on reconnect.
+          persist(optimistic);
+          void enqueueOp({
+            opId: cid,
+            type: 'CREATE_MESSAGE',
+            clientMessageId: cid,
+            conversationId,
+            payload: {
+              text: previewCaption.trim() || undefined,
+              replyTo: replyTarget?.id,
+              type,
+              attachment: {
+                type,
+                mimeType: item.mimeType,
+                width: item.width,
+                height: item.height,
+                localUri: item.uri,
+              },
+            },
+            createdAt: optimistic.createdAt,
+          });
+        } else {
+          setBase((prev) =>
+            prev.map((m) => (m.id === cid ? { ...m, status: 'failed' } : m)),
+          );
+          setOptimistic((prev) =>
+            prev.map((o) => (o.id === cid ? { ...o, status: 'failed' } : o)),
+          );
+          Alert.alert('Upload failed', e instanceof Error ? e.message : 'Could not upload media');
+        }
+      } else {
+        Alert.alert('Upload failed', e instanceof Error ? e.message : 'Could not upload media');
       }
-      Alert.alert('Upload failed', e instanceof Error ? e.message : 'Could not upload media');
     } finally {
       setUploading(false);
     }
@@ -1508,6 +1640,23 @@ export default function ChatScreen() {
     if (result.canceled || result.assets.length === 0) return;
     const asset = result.assets[0]!;
     const contentType = asset.mimeType ?? 'application/octet-stream';
+    const cid = Crypto.randomUUID();
+    const optimistic = attachToDto(
+      conversationId,
+      myId,
+      cid,
+      {
+        type: 'file',
+        attachment: {
+          type: 'file',
+          mimeType: contentType,
+          localUri: asset.uri,
+        },
+      },
+      'pending',
+    );
+    addOptimistic(optimistic);
+    persist(optimistic);
     try {
       const uploaded = await uploadAsset('chat-media', {
         uri: asset.uri,
@@ -1515,14 +1664,47 @@ export default function ChatScreen() {
         fileName: asset.name || fileNameFromUri(asset.uri),
         size: asset.size ?? undefined,
       });
-      await send({
-        attachment: {
-          ...uploaded.attachment,
-          localUri: asset.uri,
+      await send(
+        {
+          attachment: {
+            ...uploaded.attachment,
+            fileName: asset.name || fileNameFromUri(asset.uri),
+            size: asset.size ?? undefined,
+            localUri: asset.uri,
+          },
         },
-      });
+        cid,
+      );
     } catch (e) {
-      Alert.alert('Upload failed', e instanceof Error ? e.message : 'Could not upload document');
+      if (isRetryableError(e)) {
+        // Offline: keep the pending bubble and queue delivery for reconnect.
+        persist(optimistic);
+        void enqueueOp({
+          opId: cid,
+          type: 'CREATE_MESSAGE',
+          clientMessageId: cid,
+          conversationId,
+          payload: {
+            type: 'file',
+            attachment: {
+              type: 'file',
+              mimeType: contentType,
+              fileName: asset.name || fileNameFromUri(asset.uri),
+              size: asset.size ?? undefined,
+              localUri: asset.uri,
+            },
+          },
+          createdAt: optimistic.createdAt,
+        });
+      } else {
+        setBase((prev) =>
+          prev.map((m) => (m.id === cid ? { ...m, status: 'failed' } : m)),
+        );
+        setOptimistic((prev) =>
+          prev.map((o) => (o.id === cid ? { ...o, status: 'failed' } : o)),
+        );
+        Alert.alert('Upload failed', e instanceof Error ? e.message : 'Could not upload document');
+      }
     }
   };
 
@@ -1656,12 +1838,22 @@ export default function ChatScreen() {
                 }
                 replyPreview={
                   ref
-                    ? { senderId: ref.senderId, text: ref.text, type: ref.type }
+                    ? {
+                        senderId: ref.senderId,
+                        senderName:
+                          ref.senderId === myId
+                            ? 'You'
+                            : profiles.get(ref.senderId)?.fullName ??
+                              detail?.members.find((m) => m.id === ref.senderId)?.name,
+                        text: ref.text,
+                        type: ref.type,
+                      }
                     : undefined
                 }
                 onFailedRetry={item.status === 'failed' ? () => retry(item) : undefined}
                 onLongPress={openMessageActions}
                 onPress={selectMessages || actionTarget ? handleMessagePress : undefined}
+                onReactionsPress={openReactions}
                 onSwipeToReply={selectMessages ? undefined : startReply}
                 selecting={selectMessages}
                 selected={selectedMessageIds.has(item.id)}
@@ -1911,6 +2103,16 @@ export default function ChatScreen() {
           onClose={closeActionSheet}
         />
       )}
+
+      {/* Reactions detail sheet — who reacted with which emoji */}
+      <ReactionsSheet
+        message={reactionsTarget}
+        myId={myId}
+        resolveUser={resolveReactionUser}
+        visible={!!reactionsTarget && reactionsTarget.reactions.length > 0}
+        onReact={(emoji) => reactionsTarget && void toggleReact(reactionsTarget, emoji)}
+        onClose={() => setReactionsTargetId(null)}
+      />
 
       {/* Attachment menu */}
       <Modal transparent visible={addMenu} animationType="fade" onRequestClose={() => setAddMenu(false)}>

@@ -491,7 +491,7 @@ const styles = StyleSheet.create({
   itemLabel: {
     fontSize: 15,
     fontWeight: '600',
-    width: 60,
+    width: 76,
   },
   itemValue: {
     flex: 1,

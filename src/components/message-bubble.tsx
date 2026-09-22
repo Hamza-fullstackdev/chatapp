@@ -138,11 +138,12 @@ interface MessageBubbleProps {
   isOwn: boolean;
   showSenderName?: boolean;
   senderName?: string;
-  replyPreview?: { senderId: string; text: string | null; type: string } | null;
+  replyPreview?: { senderId: string; senderName?: string | null; text: string | null; type: string } | null;
   onFailedRetry?: () => void;
   onLongPress?: (message: MessageDTO) => void;
   onOpenMedia?: (attachment: AttachmentDTO) => void;
   onPress?: (message: MessageDTO) => void;
+  onReactionsPress?: (message: MessageDTO) => void;
   onSwipeToReply?: (message: MessageDTO) => void;
   selecting?: boolean;
   selected?: boolean;
@@ -392,6 +393,7 @@ export function MessageBubble({
   onLongPress,
   onOpenMedia,
   onPress,
+  onReactionsPress,
   onSwipeToReply,
   selecting = false,
   selected = false,
@@ -444,11 +446,13 @@ export function MessageBubble({
 
   const reactionsOverlay =
     hasReactions ? (
-      <View
+      <Pressable
         style={[
           styles.reactionsOverlay,
           isOwn ? styles.reactionsOwn : styles.reactionsIncoming,
         ]}
+        hitSlop={6}
+        onPress={onReactionsPress ? () => onReactionsPress(message) : undefined}
       >
         {Object.entries(
           message.reactions.reduce<Record<string, number>>((acc, r) => {
@@ -461,7 +465,7 @@ export function MessageBubble({
             {count > 1 && <Text style={[styles.reactionCount, { color: colors.textSecondary }]}>{count}</Text>}
           </View>
         ))}
-      </View>
+      </Pressable>
     ) : null;
 
   const metaRow = (
@@ -543,7 +547,7 @@ export function MessageBubble({
       {replyPreview && (
         <View style={[styles.replyBox, { borderLeftColor: colors.brand }]}>
           <Text style={[styles.replySender, { color: colors.brand }]} numberOfLines={1}>
-            {replyPreview.senderId === message.senderId ? (isOwn ? 'You' : senderName ?? 'You') : replyPreview.senderId}
+            {replyPreview.senderName ?? replyPreview.senderId}
           </Text>
           <Text style={[styles.replyText, { color: colors.textSecondary }]} numberOfLines={1}>
             {replyPreview.type !== 'text' ? '📎 Media' : replyPreview.text}

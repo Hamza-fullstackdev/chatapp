@@ -1,9 +1,11 @@
 import { Tabs, usePathname } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useWaTheme } from '@/context/theme-context';
 
 export default function TabsLayout() {
   const { colors, dark } = useWaTheme();
+  const insets = useSafeAreaInsets();
   const pathname = usePathname();
   const onChat = pathname.startsWith('/chat');
 
@@ -19,8 +21,9 @@ export default function TabsLayout() {
         tabBarInactiveTintColor: dark ? colors.textSecondary : '#54656F',
         tabBarStyle: {
           backgroundColor: dark ? colors.background : '#FFFFFF',
-          height: 64,
+          height: 64 + insets.bottom,
           paddingTop: 6,
+          paddingBottom: insets.bottom,
           borderTopWidth: 0.5,
           borderTopColor: dark ? colors.divider : '#DADDE1',
         },

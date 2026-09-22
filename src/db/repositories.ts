@@ -95,45 +95,84 @@ function rowToConversation(row: ConversationRow): ConversationDTO {
 }
 
 export async function upsertConversation(db: SQLiteDatabase, c: ConversationDTO): Promise<void> {
-  await db.runAsync(
-    `INSERT INTO conversations (
-      id, type, name, avatar_url, other_user_id, other_user_name, other_user_avatar_url,
-      last_message_id, last_message_type, last_message_text, last_message_sender_id,
-      last_message_status, last_message_created_at, last_message_has_attachments, unread_count, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      type = excluded.type,
-      name = excluded.name,
-      avatar_url = excluded.avatar_url,
-      other_user_id = excluded.other_user_id,
-      other_user_name = excluded.other_user_name,
-      other_user_avatar_url = excluded.other_user_avatar_url,
-      last_message_id = excluded.last_message_id,
-      last_message_type = excluded.last_message_type,
-      last_message_text = excluded.last_message_text,
-      last_message_sender_id = excluded.last_message_sender_id,
-      last_message_status = excluded.last_message_status,
-      last_message_created_at = excluded.last_message_created_at,
-      last_message_has_attachments = excluded.last_message_has_attachments,
-      unread_count = excluded.unread_count,
-      updated_at = excluded.updated_at`,
-    c.id,
+  const local = await db.getFirstAsync<ConversationRow>('SELECT * FROM conversations WHERE id = ?', c.id);
+  // A server list can't know about an outgoing message that is still in the
+  // offline queue (pending/syncing). Keep the local pending preview as the
+  // last message so the Chats tab reflects what the user is trying to send,
+  // instead of regressing to an older server copy.
+  const keepLocalLast =
+    !!local &&
+    (local.last_message_status === 'pending' || local.last_message_status === 'syncing');
+
+  if (!local) {
+    await db.runAsync(
+      `INSERT INTO conversations (
+        id, type, name, avatar_url, other_user_id, other_user_name, other_user_avatar_url,
+        last_message_id, last_message_type, last_message_text, last_message_sender_id,
+        last_message_status, last_message_created_at, last_message_has_attachments, unread_count, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      c.id,
+      c.type,
+      c.name,
+      c.avatarUrl,
+      c.otherUserId,
+      c.otherUserName,
+      c.otherUserAvatarUrl,
+      c.lastMessage?.id ?? null,
+      c.lastMessage?.type ?? null,
+      c.lastMessage?.text ?? null,
+      c.lastMessage?.senderId ?? null,
+      c.lastMessage?.status ?? null,
+      c.lastMessage?.createdAt ?? null,
+      c.lastMessage?.hasAttachments ? 1 : 0,
+      c.unreadCount ?? 0,
+      c.updatedAt,
+    );
+    return;
+  }
+
+  const sets: string[] = [
+    'type = ?',
+    'name = ?',
+    'avatar_url = ?',
+    'other_user_id = ?',
+    'other_user_name = ?',
+    'other_user_avatar_url = ?',
+  ];
+  const params: (string | number | null)[] = [
     c.type,
     c.name,
     c.avatarUrl,
     c.otherUserId,
     c.otherUserName,
     c.otherUserAvatarUrl,
-    c.lastMessage?.id ?? null,
-    c.lastMessage?.type ?? null,
-    c.lastMessage?.text ?? null,
-    c.lastMessage?.senderId ?? null,
-    c.lastMessage?.status ?? null,
-    c.lastMessage?.createdAt ?? null,
-    c.lastMessage?.hasAttachments ? 1 : 0,
-    c.unreadCount ?? 0,
-    c.updatedAt,
-  );
+  ];
+
+  if (!keepLocalLast) {
+    sets.push(
+      'last_message_id = ?',
+      'last_message_type = ?',
+      'last_message_text = ?',
+      'last_message_sender_id = ?',
+      'last_message_status = ?',
+      'last_message_created_at = ?',
+      'last_message_has_attachments = ?',
+    );
+    params.push(
+      c.lastMessage?.id ?? null,
+      c.lastMessage?.type ?? null,
+      c.lastMessage?.text ?? null,
+      c.lastMessage?.senderId ?? null,
+      c.lastMessage?.status ?? null,
+      c.lastMessage?.createdAt ?? null,
+      c.lastMessage?.hasAttachments ? 1 : 0,
+    );
+  }
+
+  sets.push('unread_count = ?', 'updated_at = ?');
+  params.push(c.unreadCount ?? 0, c.updatedAt);
+  params.push(c.id);
+  await db.runAsync(`UPDATE conversations SET ${sets.join(', ')} WHERE id = ?`, ...params);
 }
 
 export async function deleteConversationsLocal(db: SQLiteDatabase, ids: string[]): Promise<void> {
@@ -500,6 +539,25 @@ export async function listAllMessageIds(db: SQLiteDatabase, conversationId: stri
 
 export async function deleteMessageRow(db: SQLiteDatabase, id: string): Promise<void> {
   await db.runAsync('DELETE FROM messages WHERE id = ?', id);
+}
+
+/**
+ * Remove local rows whose client_message_id matches but whose id differs from
+ * the given one — these are the optimistic placeholder rows written to SQLite
+ * under the client-generated id before the server confirmed the message under
+ * its own id. The server copy (`keepId`) is never touched.
+ */
+export async function deleteMessageRowsByClientIdExcept(
+  db: SQLiteDatabase,
+  clientMessageId: string | null | undefined,
+  keepId: string,
+): Promise<void> {
+  if (!clientMessageId) return;
+  await db.runAsync(
+    'DELETE FROM messages WHERE client_message_id = ? AND id <> ?',
+    clientMessageId,
+    keepId,
+  );
 }
 
 export async function clearConversationMessages(db: SQLiteDatabase, conversationId: string): Promise<void> {
@@ -1119,10 +1177,18 @@ export async function refreshConversationFromMessage(
 
   const currentLastAt = existing.last_message_created_at;
   const isNewer = !currentLastAt || message.createdAt > currentLastAt;
+  // A message confirmed by the server might carry a createdAt earlier than the
+  // local device clock. If the cached last message is the still-pending
+  // placeholder for that same message, swap it for the delivered copy anyway so
+  // the pending state is not stuck in the Chats tab forever.
+  const isDeliveredPending =
+    message.clientMessageId != null &&
+    (existing.last_message_status === 'pending' || existing.last_message_status === 'syncing') &&
+    (existing.last_message_id === message.id || existing.last_message_id === message.clientMessageId);
   const updates: string[] = [];
   const params: (string | number | null)[] = [];
 
-  if (isNewer) {
+  if (isNewer || isDeliveredPending) {
     updates.push(
       'last_message_id = ?',
       'last_message_type = ?',

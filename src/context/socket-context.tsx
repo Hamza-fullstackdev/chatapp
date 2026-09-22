@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useRef, useState, type ReactNode 
 import { useAuth } from './auth-context';
 import { connectSocket, disconnectSocket, getSocket } from '@/lib/socket';
 import { installRealtimeHandlers } from '@/lib/realtime-sink';
+import { clearPresence } from '@/lib/presence';
 
 interface SocketValue {
   connected: boolean;
@@ -18,7 +19,10 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
     const socket = connectSocket(token);
     const onConnect = () => setConnected(true);
-    const onDisconnect = () => setConnected(false);
+    const onDisconnect = () => {
+      setConnected(false);
+      clearPresence();
+    };
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
 

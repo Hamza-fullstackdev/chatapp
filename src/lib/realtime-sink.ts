@@ -17,6 +17,7 @@ import {
 import { getActiveConversationId } from '@/lib/active-conversation';
 import { prewarmMessageMedia } from '@/lib/media-cache';
 import { notifyLocalDb } from '@/lib/local-db-events';
+import { setPresence } from '@/lib/presence';
 import { presentIncomingMessageNotification } from '@/lib/notifications';
 import { previewText } from '@/lib/format';
 import { sendMessageReceived } from '@/lib/socket';
@@ -154,6 +155,7 @@ export function installRealtimeHandlers(socket: Socket, currentUserId: string): 
 
   const onPresence = (event: PresenceUpdateEvent) => {
     // Presence is transient UI state; still remember the profile id locally.
+    setPresence(event.userId, event.online);
     run(async () => {
       await touchUserProfile(await getDb(), event.userId);
     });

@@ -19,6 +19,7 @@ import {
   subscribeQueue,
   type QueuedOp,
 } from '@/lib/offline-queue';
+import { uploadAsset } from '@/lib/media';
 import { pullAndApply, refreshConversations, cacheDirectoryUsers } from '@/lib/pull-sync';
 import type { MessageDTO } from '@/types/api';
 
@@ -72,22 +73,85 @@ function queueToOps(ops: QueuedOp[]): SyncTarget[] {
       conversationId: op.conversationId,
     };
     if (op.type === 'MARK_READ') return common;
-    if (op.type === 'CREATE_MESSAGE') {
-      return {
-        ...common,
-        payload: {
-          text: op.text ?? '',
-          replyTo: op.replyTo,
-          clientMessageId: op.clientMessageId,
-          conversationId: op.conversationId,
-        },
-      };
-    }
     return {
       ...common,
+      // CREATE_MESSAGE (and the other operations) carry their full payload,
+      // including type + attachment, so offline media messages survive the
+      // queue round-trip and the server can recreate them exactly.
       payload: op.payload ?? {},
     };
   });
+}
+
+type QueuedAttachment = {
+  type: string;
+  mimeType?: string;
+  fileName?: string;
+  size?: number;
+  width?: number;
+  height?: number;
+  durationMs?: number;
+  storagePath?: string;
+  gifUrl?: string;
+  previewUrl?: string;
+  provider?: string;
+  localUri?: string;
+};
+
+function contentTypeFor(type: string): string {
+  switch (type) {
+    case 'audio':
+      return 'audio/mp4';
+    case 'video':
+      return 'video/mp4';
+    case 'image':
+      return 'image/jpeg';
+    default:
+      return 'application/octet-stream';
+  }
+}
+
+/**
+ * Prepare a queued op for its push attempt. Media (image/video/audio/file)
+ * queued while offline still needs its local file uploaded to storage before
+ * the server can persist the message. Returns `null` when the upload is not
+ * possible yet (disconnected) so the op stays queued for the next flush.
+ */
+async function finalizeMediaOp(op: QueuedOp): Promise<QueuedOp | null> {
+  if (op.type !== 'CREATE_MESSAGE') return op;
+  const payload = (op.payload ?? {}) as {
+    text?: string;
+    replyTo?: string;
+    type?: string;
+    attachment?: QueuedAttachment;
+  };
+  const attachment = payload.attachment;
+  if (!attachment || !attachment.localUri) return op;
+  if (attachment.storagePath) return op;
+  try {
+    const { attachment: uploaded } = await uploadAsset(
+      'chat-media',
+      {
+        uri: attachment.localUri,
+        contentType: attachment.mimeType ?? contentTypeFor(attachment.type),
+        fileName: attachment.fileName,
+        size: attachment.size,
+      },
+      { width: attachment.width, height: attachment.height, durationMs: attachment.durationMs },
+    );
+    const next: QueuedOp = {
+      ...op,
+      payload: {
+        ...payload,
+        attachment: { ...attachment, ...uploaded },
+      },
+    };
+    await enqueueOp(next);
+    return next;
+  } catch {
+    // Disconnected or storage signing unavailable — retry next flush.
+    return null;
+  }
 }
 
 /**
@@ -131,11 +195,19 @@ export function SyncProvider({ children }: SyncProviderProps) {
     if (ops.length === 0) return [];
     setFlushing(true);
     try {
-      const { results } = await syncApi.push(queueToOps(ops));
+      // Media queued while offline must be uploaded to storage first. Ops that
+      // cannot upload yet (still disconnected) stay queued for the next flush.
+      const ready: QueuedOp[] = [];
+      for (const op of ops) {
+        const finalized = await finalizeMediaOp(op);
+        if (finalized) ready.push(finalized);
+      }
+      if (ready.length === 0) return [];
+      const { results } = await syncApi.push(queueToOps(ready));
       const applied: FlushedMessage[] = [];
       const done: string[] = [];
       const seen = new Set<string>();
-      for (const op of ops) {
+      for (const op of ready) {
         const result = results.find((r) => r.clientMessageId === op.clientMessageId);
         if (!result || result.status === 'error') continue;
         done.push(op.opId);

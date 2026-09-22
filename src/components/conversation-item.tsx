@@ -9,6 +9,7 @@ import { Ionicons } from '@expo/vector-icons';
 interface ConversationItemProps {
   conversation: ConversationDTO;
   currentUserId: string;
+  online?: boolean;
   selecting?: boolean;
   selected?: boolean;
   onPress: (id: string) => void;
@@ -51,6 +52,7 @@ function LastMessageTick({ status, colors }: { status: string; colors: WaPalette
 export function ConversationItem({
   conversation,
   currentUserId,
+  online = false,
   selecting = false,
   selected = false,
   onPress,
@@ -84,6 +86,7 @@ export function ConversationItem({
     >
       <View style={styles.avatarWrap}>
         <Avatar name={title} uri={conversationAvatar(conversation)} size={52} />
+        {conversation.type === 'private' && online && <View style={styles.onlineDot} />}
         {selecting && (
           <View
             style={[
@@ -145,6 +148,17 @@ const styles = StyleSheet.create({
   },
   avatarWrap: {
     position: 'relative',
+  },
+  onlineDot: {
+    position: 'absolute',
+    right: 0,
+    bottom: 0,
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: '#25D366',
+    borderWidth: 2.5,
+    borderColor: '#FFFFFF',
   },
   checkCircle: {
     position: 'absolute',
