@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useState } from 'react';
+import { PermissionsAndroid, Platform } from 'react-native';
 import * as Crypto from 'expo-crypto';
 import { Directory, File, Paths } from 'expo-file-system';
 import { Asset, requestPermissionsAsync as requestMediaLibraryPermissions } from 'expo-media-library';
+import SaveToDownloads from '../../modules/save-to-downloads/src/SaveToDownloadsModule';
 import { getDb } from '@/db/database';
 import {
   getCachedMedia,
   getCachedMediaForAttachment,
   listMessages,
   markMediaSavedToPhotos,
+  markMediaSavedToDevice,
   mediaCacheSize,
   removeCachedMedia,
   upsertCachedMedia,
@@ -140,6 +143,7 @@ async function runDownload(
         localUri: current.uri,
         downloadedAt: new Date().toISOString(),
         savedToPhotos: false,
+        savedToDevice: false,
       });
       return current.uri;
     }
@@ -163,6 +167,7 @@ async function runDownload(
       localUri: file.uri,
       downloadedAt: new Date().toISOString(),
       savedToPhotos: false,
+      savedToDevice: false,
     });
     notifyLocalDb();
     return file.uri;
@@ -356,6 +361,57 @@ async function isSavedToPhotos(attachment: AttachmentDTO): Promise<boolean> {
   return entry?.savedToPhotos === true;
 }
 
+/** True when the cached bytes were already copied into the Downloads folder. */
+async function isSavedToDevice(attachment: AttachmentDTO): Promise<boolean> {
+  const db = await getDb();
+  const entry = await getCachedMedia(db, await md5(mediaCacheKey(attachment)));
+  return entry?.savedToDevice === true;
+}
+
+/**
+ * Best-effort original file name for the receiver's Downloads entry: the
+ * explicit `fileName` when the sender forwarded one, else the storage object's
+ * basename (the server stores it under `safeFileName(...)`), else a mime-ish
+ * fallback.
+ */
+function displayFileName(attachment: AttachmentDTO): string {
+  if (attachment.fileName?.trim()) return attachment.fileName.trim();
+  const path = attachment.storagePath ?? '';
+  const parts = path.split('/').filter(Boolean);
+  const base = parts.length > 1 ? parts[parts.length - 1] : '';
+  if (base) return base;
+  return `document${extFor(attachment)}`;
+}
+
+/**
+ * Copy a locally-cached file into the device's public Downloads folder
+ * (Android "Downloads / Media Files"). Android 10+ writes through MediaStore
+ * and needs no storage permission; Android 5–9 requests WRITE_EXTERNAL_STORAGE
+ * at runtime. Marks the cache entry so the download chip never returns.
+ */
+async function saveToDownloadsFolder(localUri: string, attachment: AttachmentDTO): Promise<boolean> {
+  if (Platform.OS !== 'android') return false;
+  if (Platform.Version < 29) {
+    try {
+      const granted = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE,
+      );
+      if (granted !== PermissionsAndroid.RESULTS.GRANTED) return false;
+    } catch {
+      return false;
+    }
+  }
+  try {
+    await SaveToDownloads.saveToDownloads(toFileUri(localUri), displayFileName(attachment), attachment.mimeType);
+    const db = await getDb();
+    await markMediaSavedToDevice(db, await md5(mediaCacheKey(attachment)));
+    notifyLocalDb();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Export a locally-cached file into the device photo library. Asks the user
  * for the media-library permission the first time (write-only, so no read
@@ -377,13 +433,17 @@ async function saveToPhotoLibrary(localUri: string, storageKey: string): Promise
 
 /**
  * WhatsApp-style "Download": ensures the bytes live in the app's private
- * persistent cache (fast render on re-open) and, for images/GIFs/videos, also
- * saves them into the device photo library via the storage permission prompt.
- * Audio/files are considered downloaded once cached for offline playback.
+ * persistent cache (fast render on re-open) and then persists a copy where the
+ * user expects it — documents go into the device Downloads/Media Files folder,
+ * images/GIFs/videos into the device photo library via the storage permission
+ * prompt. Audio files are considered downloaded once cached for offline playback.
  */
 export async function downloadAndSaveToGallery(attachment: AttachmentDTO): Promise<boolean> {
   const uri = await downloadAttachment(attachment);
   if (!uri) return false;
+  if (attachment.type === 'file') {
+    return saveToDownloadsFolder(uri, attachment);
+  }
   if (isGalleryShareable(attachment)) {
     return saveToPhotoLibrary(uri, await md5(mediaCacheKey(attachment)));
   }
@@ -414,6 +474,15 @@ export function useAttachmentDownloadState(
     if (attachment.type === 'audio') {
       const cached = await getCachedFile(attachment);
       setState(cached && cached.exists ? 'downloaded' : (isMediaDownloading(attachment) ? 'downloading' : 'idle'));
+      return;
+    }
+    // file: downloaded only once the user exported it into the Downloads folder.
+    if (attachment.type === 'file') {
+      if (await isSavedToDevice(attachment)) {
+        setState('downloaded');
+        return;
+      }
+      setState(isMediaDownloading(attachment) ? 'downloading' : 'idle');
       return;
     }
     // image / gif / video: downloaded only when persisted to the gallery.

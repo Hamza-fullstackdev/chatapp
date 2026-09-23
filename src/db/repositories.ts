@@ -416,8 +416,45 @@ type MessageRow = {
   has_attachments: number;
 };
 
-type AttachmentRow = AttachmentDTO & { message_id: string };
+type AttachmentRow = {
+  message_id: string;
+  id: string;
+  type: string;
+  storage_path: string | null;
+  mime_type: string | null;
+  file_name: string | null;
+  size: number | null;
+  width: number | null;
+  height: number | null;
+  duration_ms: number | null;
+  thumbnail_path: string | null;
+  provider: string | null;
+  provider_id: string | null;
+  preview_url: string | null;
+  gif_url: string | null;
+};
 type ReactionRow = ReactionDTO & { message_id: string };
+
+/** SQLite stores snake_case columns; map them back to the camelCase DTO. */
+function rowToAttachment(row: AttachmentRow): AttachmentDTO {
+  return {
+    id: row.id,
+    type: row.type,
+    storagePath: row.storage_path,
+    mimeType: row.mime_type,
+    fileName: row.file_name,
+    size: row.size,
+    width: row.width,
+    height: row.height,
+    durationMs: row.duration_ms,
+    thumbnailPath: row.thumbnail_path,
+    provider: row.provider,
+    providerId: row.provider_id,
+    previewUrl: row.preview_url,
+    gifUrl: row.gif_url,
+    localUri: null,
+  };
+}
 
 function rowToMessage(row: MessageRow, attachments: AttachmentDTO[], reactions: ReactionDTO[]): MessageDTO {
   return {
@@ -462,14 +499,15 @@ export async function upsertMessage(db: SQLiteDatabase, message: MessageDTO): Pr
   for (const a of message.attachments ?? []) {
     await db.runAsync(
       `INSERT OR REPLACE INTO message_attachments (
-        id, message_id, type, storage_path, mime_type, size, width, height,
+        id, message_id, type, storage_path, mime_type, file_name, size, width, height,
         duration_ms, thumbnail_path, provider, provider_id, preview_url, gif_url
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       a.id,
       message.id,
       a.type,
       a.storagePath,
       a.mimeType,
+      a.fileName ?? null,
       a.size ?? null,
       a.width ?? null,
       a.height ?? null,
@@ -510,7 +548,7 @@ async function loadFullMessage(db: SQLiteDatabase, row: MessageRow): Promise<Mes
   );
   return rowToMessage(
     row,
-    attachments.map(({ message_id: _m, ...rest }) => rest),
+    attachments.map(rowToAttachment),
     reactions.map(({ message_id: _m, ...rest }) => rest),
   );
 }
@@ -771,6 +809,7 @@ export interface MediaCacheEntry {
   localUri: string;
   downloadedAt: string;
   savedToPhotos: boolean;
+  savedToDevice: boolean;
 }
 
 type MediaCacheRow = {
@@ -784,6 +823,7 @@ type MediaCacheRow = {
   local_uri: string;
   downloaded_at: string;
   saved_to_photos: number;
+  saved_to_device: number;
 };
 
 function rowToMediaCache(row: MediaCacheRow): MediaCacheEntry {
@@ -798,6 +838,7 @@ function rowToMediaCache(row: MediaCacheRow): MediaCacheEntry {
     localUri: row.local_uri,
     downloadedAt: row.downloaded_at,
     savedToPhotos: row.saved_to_photos === 1,
+    savedToDevice: row.saved_to_device === 1,
   };
 }
 
@@ -805,8 +846,8 @@ export async function upsertCachedMedia(db: SQLiteDatabase, entry: MediaCacheEnt
   await db.runAsync(
     `INSERT INTO media_cache (
       storage_key, attachment_id, message_id, conversation_id, storage_path,
-      mime_type, size, local_uri, downloaded_at, saved_to_photos
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      mime_type, size, local_uri, downloaded_at, saved_to_photos, saved_to_device
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(storage_key) DO UPDATE SET
       attachment_id = excluded.attachment_id,
       message_id = excluded.message_id,
@@ -816,7 +857,8 @@ export async function upsertCachedMedia(db: SQLiteDatabase, entry: MediaCacheEnt
       size = excluded.size,
       local_uri = excluded.local_uri,
       downloaded_at = excluded.downloaded_at,
-      saved_to_photos = media_cache.saved_to_photos OR excluded.saved_to_photos`,
+      saved_to_photos = media_cache.saved_to_photos OR excluded.saved_to_photos,
+      saved_to_device = media_cache.saved_to_device OR excluded.saved_to_device`,
     entry.storageKey,
     entry.attachmentId,
     entry.messageId,
@@ -827,12 +869,18 @@ export async function upsertCachedMedia(db: SQLiteDatabase, entry: MediaCacheEnt
     entry.localUri,
     entry.downloadedAt,
     entry.savedToPhotos ? 1 : 0,
+    entry.savedToDevice ? 1 : 0,
   );
 }
 
 /** Marks a cached file as exported to the device photo library (idempotent). */
 export async function markMediaSavedToPhotos(db: SQLiteDatabase, storageKey: string): Promise<void> {
   await db.runAsync('UPDATE media_cache SET saved_to_photos = 1 WHERE storage_key = ?', storageKey);
+}
+
+/** Marks a cached file as exported to the device Downloads folder (idempotent). */
+export async function markMediaSavedToDevice(db: SQLiteDatabase, storageKey: string): Promise<void> {
+  await db.runAsync('UPDATE media_cache SET saved_to_device = 1 WHERE storage_key = ?', storageKey);
 }
 
 export async function getCachedMedia(db: SQLiteDatabase, storageKey: string): Promise<MediaCacheEntry | null> {

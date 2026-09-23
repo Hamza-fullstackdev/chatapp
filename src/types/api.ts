@@ -13,6 +13,7 @@ export interface AttachmentDTO {
   type: string;
   storagePath: string | null;
   mimeType: string | null;
+  fileName: string | null;
   size: number | null;
   width: number | null;
   height: number | null;

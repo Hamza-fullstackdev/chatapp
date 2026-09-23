@@ -376,7 +376,7 @@ function AttachmentMedia({
     <View style={[styles.fileBox, { backgroundColor: colors.background }]}>
       <Ionicons name={name} size={26} color={colors.brand} />
       <Text style={[styles.fileName, { color: colors.text }]} numberOfLines={2}>
-        {attachment.mimeType ?? attachment.type}
+        {attachment.fileName ?? attachment.mimeType ?? attachment.type}
       </Text>
       <DownloadChip attachment={attachment} />
     </View>

@@ -22,6 +22,7 @@ export type AttachmentPayload = {
   type: string;
   storagePath?: string;
   mimeType?: string;
+  fileName?: string;
   size?: number;
   width?: number;
   height?: number;

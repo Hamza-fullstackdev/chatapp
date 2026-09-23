@@ -72,6 +72,7 @@ const TABLE_DDL: string[] = [
     type TEXT NOT NULL,
     storage_path TEXT,
     mime_type TEXT,
+    file_name TEXT,
     size INTEGER,
     width INTEGER,
     height INTEGER,
@@ -108,7 +109,8 @@ const TABLE_DDL: string[] = [
     size INTEGER NOT NULL DEFAULT 0,
     local_uri TEXT NOT NULL,
     downloaded_at TEXT NOT NULL,
-    saved_to_photos INTEGER NOT NULL DEFAULT 0
+    saved_to_photos INTEGER NOT NULL DEFAULT 0,
+    saved_to_device INTEGER NOT NULL DEFAULT 0
   )`,
   `CREATE TABLE IF NOT EXISTS user_profiles (
     id TEXT PRIMARY KEY NOT NULL,
@@ -435,6 +437,27 @@ async function migrationV11(db: SQLite.SQLiteDatabase): Promise<void> {
   ]);
 }
 
+/**
+ * Migration 12 — original file name on attachments + Downloads export flag.
+ *
+ * Document attachments now carry the sender's original `file_name` (mirrors
+ * the server's `message_attachments.file_name`) so the receiver can save a
+ * downloaded document into the device Downloads/Media Files folder under its
+ * real name. `saved_to_device` records that the cached file was already
+ * exported to Downloads so the download chip stays hidden (same contract as
+ * `saved_to_photos`). Uses `ensureColumns` only — deliberately NOT
+ * `repairSchema`, which would DROP tables missing the new canonical columns
+ * and wipe already-downloaded attachment metadata on old installs.
+ */
+async function migrationV12(db: SQLite.SQLiteDatabase): Promise<void> {
+  await ensureColumns(db, 'message_attachments', [
+    ['file_name', 'TEXT'],
+  ]);
+  await ensureColumns(db, 'media_cache', [
+    ['saved_to_device', 'INTEGER NOT NULL DEFAULT 0'],
+  ]);
+}
+
 const MIGRATIONS: MigrationStep[] = [
   MIGRATION_V1,
   migrationV2,
@@ -447,6 +470,7 @@ const MIGRATIONS: MigrationStep[] = [
   migrationV9,
   migrationV10,
   migrationV11,
+  migrationV12,
 ];
 
 async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
