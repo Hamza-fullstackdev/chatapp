@@ -4,6 +4,7 @@ import type {
   CallDTO,
   ConversationDTO,
   ConversationDetailDTO,
+  FriendRequestDTO,
   GroupDetailDTO,
   IceServerDTO,
   MessageDTO,
@@ -77,6 +78,23 @@ export const usersApi = {
   },
   get(id: string): Promise<UserDTO> {
     return http.get<UserDTO>(`/api/users/${id}`);
+  },
+};
+
+export const friendRequestsApi = {
+  list(): Promise<{ incoming: FriendRequestDTO[]; outgoing: FriendRequestDTO[] }> {
+    return http.get<{ incoming: FriendRequestDTO[]; outgoing: FriendRequestDTO[] }>(
+      '/api/friend-requests',
+    );
+  },
+  send(receiverId: string): Promise<{ request: FriendRequestDTO }> {
+    return http.post<{ request: FriendRequestDTO }>('/api/friend-requests', { receiverId });
+  },
+  accept(id: string): Promise<{ request: FriendRequestDTO }> {
+    return http.post<{ request: FriendRequestDTO }>(`/api/friend-requests/${id}/accept`);
+  },
+  reject(id: string): Promise<{ request: FriendRequestDTO }> {
+    return http.post<{ request: FriendRequestDTO }>(`/api/friend-requests/${id}/reject`);
   },
 };
 

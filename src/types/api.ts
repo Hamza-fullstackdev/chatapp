@@ -1,3 +1,5 @@
+export type FriendshipStatus = 'none' | 'pending_outgoing' | 'pending_incoming' | 'friends';
+
 export interface UserDTO {
   id: string;
   fullName: string;
@@ -6,6 +8,19 @@ export interface UserDTO {
   avatarUrl: string | null;
   lastSeenAt: string | null;
   createdAt: string;
+  /** Relationship to the requesting user (contacts list only). */
+  friendship?: FriendshipStatus;
+}
+
+export interface FriendRequestDTO {
+  id: string;
+  senderId: string;
+  receiverId: string;
+  status: 'pending' | 'accepted' | 'rejected';
+  createdAt: string;
+  respondedAt: string | null;
+  /** The peer (other party) — the user the request concerns, from the viewer's POV. */
+  user: { id: string; fullName: string; username: string; avatarUrl: string | null };
 }
 
 export interface AttachmentDTO {

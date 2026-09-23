@@ -14,12 +14,12 @@ import { StatusBar } from 'expo-status-bar';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Image } from 'expo-image';
 import { useWaTheme } from '@/context/theme-context';
-import { conversationsApi, usersApi } from '@/lib/api';
+import { conversationsApi, friendRequestsApi, usersApi } from '@/lib/api';
 import { getDb } from '@/db/database';
 import { getUserProfile, upsertUserProfile } from '@/db/repositories';
 import { Avatar } from '@/components/avatar';
 import { formatLastSeen } from '@/lib/format';
-import type { UserDTO } from '@/types/api';
+import type { FriendshipStatus, UserDTO } from '@/types/api';
 
 export default function UserProfileScreen() {
   const params = useLocalSearchParams<{ id: string }>();
@@ -28,6 +28,7 @@ export default function UserProfileScreen() {
   const insets = useSafeAreaInsets();
 
   const [profile, setProfile] = useState<UserDTO | null>(null);
+  const [friendship, setFriendship] = useState<FriendshipStatus>('none');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
@@ -48,6 +49,7 @@ export default function UserProfileScreen() {
         const loaded = await usersApi.get(userId);
         if (!active) return;
         setProfile(loaded);
+        setFriendship(loaded.friendship ?? 'none');
         setLoading(false);
         await upsertUserProfile(db, {
           id: loaded.id,
@@ -80,6 +82,65 @@ export default function UserProfileScreen() {
       Alert.alert('Could not open chat', e instanceof Error ? e.message : 'Try again');
     }
   };
+
+  // "We have sent a request to X. Wait until they accept your request."
+  const requestSentMessage = (name: string) =>
+    `We have sent a request to ${name}. Wait until they accept your request.`;
+
+  const sendRequest = async () => {
+    if (starting || !profile) return;
+    setStarting(true);
+    try {
+      await friendRequestsApi.send(profile.id);
+      setFriendship('pending_outgoing');
+      Alert.alert('Request sent', requestSentMessage(profile.fullName));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Try again';
+      if (msg === 'REQUEST_ALREADY_PENDING') {
+        setFriendship('pending_outgoing');
+        Alert.alert('Request pending', requestSentMessage(profile.fullName));
+      } else if (msg.includes('already sent you a request')) {
+        setFriendship('pending_incoming');
+        Alert.alert('Request pending', `${profile.fullName} sent you a request. Accept it to connect.`);
+      } else if (msg.includes('already friends')) {
+        setFriendship('friends');
+        Alert.alert('Connected', `You and ${profile.fullName} are already friends.`);
+      } else {
+        Alert.alert('Could not send request', msg);
+      }
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  const acceptRequest = async () => {
+    if (starting || !profile) return;
+    setStarting(true);
+    try {
+      const { incoming } = await friendRequestsApi.list();
+      const request = incoming.find((r) => r.user.id === profile.id);
+      if (!request) throw new Error('No pending request from this user');
+      await friendRequestsApi.accept(request.id);
+      setFriendship('friends');
+      Alert.alert('Connected', `You and ${profile.fullName} can now chat.`, [
+        { text: 'OK' },
+        { text: 'Message', onPress: () => void openChat() },
+      ]);
+    } catch (e) {
+      Alert.alert('Could not accept request', e instanceof Error ? e.message : 'Try again');
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  const primaryAction =
+    friendship === 'friends'
+      ? { handler: openChat, label: 'Message', icon: 'chatbubble-ellipses' as const }
+      : friendship === 'pending_outgoing'
+        ? { handler: undefined, label: 'Request sent', icon: 'time-outline' as const }
+        : friendship === 'pending_incoming'
+          ? { handler: acceptRequest, label: 'Accept request', icon: 'person-add' as const }
+          : { handler: sendRequest, label: 'Add friend', icon: 'person-add' as const };
 
   const showName = profile?.fullName ?? '';
   const online = false;
@@ -121,20 +182,24 @@ export default function UserProfileScreen() {
           </Text>
 
           <Pressable
-            onPress={openChat}
-            disabled={starting}
+            onPress={() => {
+              if (primaryAction.handler) void primaryAction.handler();
+            }}
+            disabled={starting || !primaryAction.handler}
             style={({ pressed }) => [
               styles.messageBtn,
               { backgroundColor: pressed ? '#00806b' : colors.brand },
-              starting && styles.busy,
+              (starting || !primaryAction.handler) && styles.busy,
             ]}
           >
             {starting ? (
               <ActivityIndicator size="small" color="#FFFFFF" />
             ) : (
-              <Ionicons name="chatbubble-ellipses" size={20} color="#FFFFFF" />
+              <Ionicons name={primaryAction.icon} size={20} color="#FFFFFF" />
             )}
-            <Text style={styles.messageBtnText}>{starting ? 'Opening…' : 'Message'}</Text>
+            <Text style={styles.messageBtnText}>
+              {starting ? 'Working…' : primaryAction.label}
+            </Text>
           </Pressable>
 
           <View style={[styles.card, { backgroundColor: colors.backgroundSecondary }]}>

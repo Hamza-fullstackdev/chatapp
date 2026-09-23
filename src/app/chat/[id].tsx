@@ -186,7 +186,7 @@ export default function ChatScreen() {
   const { user } = useAuth();
   const { colors, dark } = useWaTheme();
   const { connected } = useSocket();
-  const { startCall } = useCalls();
+  const { startCall, starting } = useCalls();
   const insets = useSafeAreaInsets();
 
   const myId = user?.id ?? '';
@@ -416,11 +416,13 @@ export default function ChatScreen() {
           {
             icon: 'call' as const,
             label: 'Voice call',
+            disabled: starting,
             action: () => void startCall(otherUserId, 'voice', conversationId),
           },
           {
             icon: 'videocam' as const,
             label: 'Video call',
+            disabled: starting,
             action: () => void startCall(otherUserId, 'video', conversationId),
           },
         ]
@@ -428,11 +430,13 @@ export default function ChatScreen() {
     {
       icon: 'checkbox' as const,
       label: 'Select messages',
+      disabled: false,
       action: startSelectMessages,
     },
     {
       icon: isGroup ? ('people' as const) : ('person' as const),
       label: isGroup ? 'Group info' : 'View contact',
+      disabled: false,
       action: openProfile,
     },
   ];
@@ -1841,7 +1845,8 @@ export default function ChatScreen() {
           {!isGroup && otherUserId && (
             <Pressable
               hitSlop={10}
-              style={styles.headerBtn}
+              style={[styles.headerBtn, { opacity: starting ? 0.4 : 1 }]}
+              disabled={starting}
               onPress={() => void startCall(otherUserId, 'voice', conversationId)}
             >
               <Ionicons name="call" size={20} color="#FFFFFF" />
@@ -2225,7 +2230,11 @@ export default function ChatScreen() {
               <Pressable
                 key={item.label}
                 hitSlop={6}
-                style={({ pressed }) => [styles.menuItem, pressed && { opacity: 0.6 }]}
+                style={({ pressed }) => [
+                  styles.menuItem,
+                  item.disabled ? { opacity: 0.4 } : pressed && { opacity: 0.6 },
+                ]}
+                disabled={item.disabled}
                 onPress={() => {
                   setHeaderMenuOpen(false);
                   item.action();
