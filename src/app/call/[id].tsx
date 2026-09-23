@@ -179,12 +179,14 @@ export default function CallScreen() {
   useEffect(() => {
     if (!call) return;
     const timer = setTimeout(() => {
-      void initPeer();
       if (call.isOutgoing) {
         const attemptOffer = () => {
           if (pcRef.current) void sendOffer(pcRef.current, onSignal).catch(() => undefined);
         };
-        attemptOffer();
+        // Send the first offer as soon as the peer connection is live (initPeer
+        // is async: getUserMedia + ICE load take a moment) rather than waiting
+        // for the 2.5s retry tick.
+        void initPeer().then(attemptOffer);
         offerTimer.current = setInterval(() => {
           if (answerReceived.current || endedRef.current) {
             stopOfferLoop();
