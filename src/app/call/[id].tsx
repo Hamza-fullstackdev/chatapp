@@ -18,6 +18,8 @@ import {
 } from '@/lib/webrtc';
 import { Avatar } from '@/components/avatar';
 import type { CallDTO, PresenceUpdateEvent } from '@/types/api';
+import { resetCallAudioMode, routeCallAudio, startCallTone, stopCallTone } from '@/lib/call-audio';
+import { claimActiveCallScreen, releaseActiveCallScreen } from '@/lib/call-routing';
 
 interface SignalEvent {
   from: string;
@@ -50,6 +52,8 @@ export default function CallScreen() {
 
   const [muted, setMuted] = useState(false);
   const [elapsed, setElapsed] = useState(0);
+  // Video calls default to the loudspeaker; voice calls to the earpiece.
+  const [speakerOn, setSpeakerOn] = useState(callType === 'video');
   // True once a callee answers from this screen (covers the push-tap entry
   // where no in-app incoming banner was ever shown).
   const [incomingAccepted, setIncomingAccepted] = useState(false);
@@ -172,6 +176,19 @@ export default function CallScreen() {
       active = false;
     };
   }, [callId]);
+
+  // Claim the call route (so push taps / socket events don't stack a second
+  // call screen) and put the audio session into WebRTC mode — earpiece for
+  // voice calls, loudspeaker for video. Restore everything on unmount.
+  useEffect(() => {
+    claimActiveCallScreen(callId);
+    void routeCallAudio(callType === 'video');
+    return () => {
+      releaseActiveCallScreen(callId);
+      stopCallTone();
+      void resetCallAudioMode();
+    };
+  }, [callId, callType]);
 
   // Establish the peer connection and drive the offer/answer handshake.
   // Caller: re-announce the offer until the callee answers.
@@ -296,6 +313,14 @@ export default function CallScreen() {
     setMuted(next);
   };
 
+  const toggleSpeaker = () => {
+    setSpeakerOn((prev) => {
+      const next = !prev;
+      void routeCallAudio(next);
+      return next;
+    });
+  };
+
   // Incoming call answered from this screen (push-tap entry): flip the server
   // state, then the effect above spins up media + the offer handshake.
   const acceptCall = () => {
@@ -327,6 +352,17 @@ export default function CallScreen() {
         : call?.status === 'ongoing'
           ? 'Connecting…'
           : 'Ringing…';
+
+  // Dial tone while calling, ringtone while being called — silenced as soon as
+  // media connects (or the screen unmounts).
+  useEffect(() => {
+    if (mediaLive || endedRef.current) {
+      stopCallTone();
+      return;
+    }
+    if (ringingIncoming) startCallTone('ringtone');
+    else if (outgoing) startCallTone('ringback');
+  }, [mediaLive, ringingIncoming, outgoing]);
 
   return (
     <SafeAreaView edges={['top', 'bottom']} style={[styles.safe, { backgroundColor: '#0B141A' }]}>
@@ -373,8 +409,8 @@ export default function CallScreen() {
           <Pressable style={[styles.controlBtn, styles.endBtn]} onPress={hangup}>
             <Ionicons name="call" size={30} color="#FFFFFF" style={{ transform: [{ rotate: '135deg' }] }} />
           </Pressable>
-          <Pressable style={styles.controlBtn} onPress={() => undefined}>
-            <Ionicons name="volume-high" size={24} color="#FFFFFF" />
+          <Pressable style={styles.controlBtn} onPress={toggleSpeaker}>
+            <Ionicons name={speakerOn ? 'volume-high' : 'volume-low'} size={24} color="#FFFFFF" />
           </Pressable>
         </View>
       )}

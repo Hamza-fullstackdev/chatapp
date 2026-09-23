@@ -73,6 +73,64 @@ async function captureLocalStream(video: boolean): Promise<MediaStream | null> {
 }
 
 /**
+ * Every ICE candidate this side has gathered for a connection. Offers are
+ * re-announced (a callee may recover a copy that raced its mount), and each
+ * re-announcement replays the gathered candidates so none are ever lost to a
+ * peer that was not listening yet — the classic "offer arrives but ICE never
+ * does" failure mode.
+ */
+const gatheredIce = new WeakMap<RTCPeerConnection, RTCIceCandidate[]>();
+
+function storeGatheredCandidate(pc: RTCPeerConnection, candidate: RTCIceCandidate): void {
+  const list = gatheredIce.get(pc) ?? [];
+  list.push(candidate);
+  gatheredIce.set(pc, list);
+}
+
+function gatheredFor(pc: RTCPeerConnection): RTCIceCandidate[] {
+  return gatheredIce.get(pc) ?? [];
+}
+
+/**
+ * Resolve once the connection has finished gathering ICE candidates (or after
+ * a safety timeout). Used to make the first offer bundle every candidate into
+ * the SDP — non-trickle — so a peer that missed the individual `ice` packets
+ * still gets a fully routable offer on the very first attempt.
+ */
+function waitForIceGathering(pc: RTCPeerConnection, timeoutMs = 2500): Promise<void> {
+  return new Promise((resolve) => {
+    if (pc.iceGatheringState === 'complete') {
+      resolve();
+      return;
+    }
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const cleanup = () => {
+      pc.onicegatheringstatechange = null;
+      clearTimeout(timer);
+    };
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+    const onState = () => {
+      if (pc.iceGatheringState === 'complete') finish();
+    };
+    pc.onicegatheringstatechange = onState;
+    timer = setTimeout(finish, timeoutMs);
+  });
+}
+
+/** Re-broadcast every candidate gathered so far (used when re-announcing an offer). */
+function reemitGatheredIce(pc: RTCPeerConnection, onSignal: (packet: OutboundSignal) => void): void {
+  for (const candidate of gatheredFor(pc)) {
+    onSignal({ type: 'ice', data: candidate.toJSON() });
+  }
+}
+
+/**
  * Create a peer connection bound to a signal emitter. All outgoing
  * offer/answer/ICE packets are forwarded through `onSignal` so the caller can
  * relay them over the socket; inbound remote streams surface via `onRemoteStream`.
@@ -94,6 +152,7 @@ export async function createCallPeerConnection(
 
   pc.onicecandidate = (event: { candidate?: RTCIceCandidate }) => {
     if (event.candidate) {
+      storeGatheredCandidate(pc, event.candidate);
       onSignal({ type: 'ice', data: event.candidate.toJSON() });
     }
   };
@@ -154,8 +213,10 @@ export async function handleIncomingSignal(
 ): Promise<OutboundSignal | null> {
   if (signal.type === 'request-offer') {
     // A peer that joined (or recovered) the call asks for our current offer so
-    // it never has to wait for the next re-announcement tick.
+    // it never has to wait for the next re-announcement tick. Hold off until
+    // gathering completes so the returned offer carries every ICE candidate.
     if (pc.localDescription && pc.localDescription.type === 'offer') {
+      await waitForIceGathering(pc);
       return { type: 'offer', data: pc.localDescription.toJSON() };
     }
     return null;
@@ -194,8 +255,9 @@ export async function handleIncomingSignal(
 /**
  * Create (or re-announce) the local offer. The retry loop in the call screen
  * calls this repeatedly until the peer answers; re-emitting the existing offer
- * lets the callee recover a copy that arrived before its peer connection was
- * ready, instead of the offer being lost forever.
+ * (with its gathered ICE candidates back-ported into the SDP and re-sent
+ * individually) lets the callee recover a copy that arrived before its peer
+ * connection was ready, instead of the offer being lost forever.
  */
 export async function sendOffer(pc: RTCPeerConnection, onSignal: (packet: OutboundSignal) => void) {
   if (pc.remoteDescription) {
@@ -203,12 +265,18 @@ export async function sendOffer(pc: RTCPeerConnection, onSignal: (packet: Outbou
   }
   if (pc.localDescription && pc.localDescription.type === 'offer') {
     onSignal({ type: 'offer', data: pc.localDescription.toJSON() });
+    reemitGatheredIce(pc, onSignal);
     return;
   }
   const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
   await pc.setLocalDescription(offer);
+  // Two-stage handshake help: bundle the gathered candidates into the SDP
+  // before announcing so a peer that missed the trickled `ice` packets still
+  // receives a fully routable offer.
+  await waitForIceGathering(pc);
   if (pc.localDescription) {
     onSignal({ type: 'offer', data: pc.localDescription.toJSON() });
+    reemitGatheredIce(pc, onSignal);
   }
 }
 

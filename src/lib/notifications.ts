@@ -7,6 +7,18 @@ import { getDeviceId } from '@/lib/secure';
 
 const PUSH_TOKEN_KEY = 'chat.push.token';
 
+/** Notification category for incoming calls; its actions answer or decline. */
+export const CALL_CATEGORY_ID = 'incoming-call';
+export const CALL_ACTION_ANSWER = 'answer';
+export const CALL_ACTION_DECLINE = 'decline';
+/** Android channel incoming-call pushes are delivered on (loud, heads-up). */
+export const CALL_CHANNEL_ID = 'calls';
+
+/** True when a push notification carries an incoming-call payload. */
+export function isIncomingCallNotification(data: Record<string, unknown> | null | undefined): boolean {
+  return !!data && data.kind === 'incoming-call';
+}
+
 async function storePushToken(token: string | null): Promise<void> {
   try {
     if (token) {
@@ -29,13 +41,48 @@ export async function readStoredPushToken(): Promise<string | null> {
 
 export function configureNotificationHandler(): void {
   Notifications.setNotificationHandler({
-    handleNotification: async () => ({
-      shouldShowBanner: true,
-      shouldShowList: true,
-      shouldPlaySound: true,
-      shouldSetBadge: false,
-    }),
+    handleNotification: async (notification) => {
+      // Incoming calls are answered by the on-screen call UI (the app plays its
+      // own ringtone), so suppress the banner/sound the OS would otherwise
+      // bolt on top of it. Everything else keeps the default behaviour.
+      const isCall = isIncomingCallNotification(notification.request.content.data);
+      return {
+        shouldShowBanner: !isCall,
+        shouldShowList: true,
+        shouldPlaySound: !isCall,
+        shouldSetBadge: false,
+      };
+    },
   });
+}
+
+/**
+ * Register the artifacts incoming-call pushes rely on:
+ *  - an Android "calls" channel (importance MAX so ringing breaks through in
+ *    the background), and
+ *  - the "incoming-call" category whose Answer / Decline buttons surface on
+ *    the lock screen / notification drawer on both platforms.
+ */
+export async function registerCallNotificationChannel(): Promise<void> {
+  try {
+    if (Platform.OS === 'android') {
+      await Notifications.setNotificationChannelAsync(CALL_CHANNEL_ID, {
+        name: 'Calls',
+        importance: Notifications.AndroidImportance.MAX,
+        vibrationPattern: [0, 250, 500, 250],
+      });
+    }
+    await Notifications.setNotificationCategoryAsync(CALL_CATEGORY_ID, [
+      { identifier: CALL_ACTION_ANSWER, buttonTitle: 'Answer' },
+      {
+        identifier: CALL_ACTION_DECLINE,
+        buttonTitle: 'Decline',
+        options: { isDestructive: true },
+      },
+    ]);
+  } catch {
+    // Categories/channels are best-effort; calls still ring in-app.
+  }
 }
 
 /**
@@ -57,6 +104,7 @@ export async function registerDeviceForPush(): Promise<void> {
       vibrationPattern: [0, 250, 250, 250],
     });
   }
+  await registerCallNotificationChannel();
 
   const { status } = await Notifications.requestPermissionsAsync();
   if (status !== 'granted') return;
