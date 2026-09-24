@@ -55,6 +55,12 @@ export interface MessageDTO {
   type: string;
   text: string | null;
   replyTo: string | null;
+  /** Quote target for a "reply to status" message — the source status id. */
+  statusReplyTo: string | null;
+  /** Call-log metadata (type 'call' messages only). */
+  callType: string | null;
+  callDurationMs: number | null;
+  callStatus: string | null;
   status: string;
   createdAt: string;
   editedAt: string | null;

@@ -5,6 +5,7 @@ import { useAuth } from '@/context/auth-context';
 import { useWaTheme } from '@/context/theme-context';
 import { Avatar } from '@/components/avatar';
 import { formatLastSeen } from '@/lib/format';
+import { usePresence } from '@/lib/presence';
 import { authApi } from '@/lib/api';
 import { pickAvatarImage, uploadAvatar, type LocalUploadSource } from '@/lib/media';
 import { clearMediaCache, getMediaCacheStats } from '@/lib/media-cache';
@@ -21,6 +22,8 @@ function formatBytes(bytes: number): string {
 export default function SettingsScreen() {
   const { user, signOut, updateUser } = useAuth();
   const { colors } = useWaTheme();
+  const presence = usePresence();
+  const selfOnline = !!user && presence.has(user.id);
   const [editing, setEditing] = useState(false);
   const [fullName, setFullName] = useState('');
   const [username, setUsername] = useState('');
@@ -175,7 +178,7 @@ export default function SettingsScreen() {
         <Text style={styles.name}>{user.fullName}</Text>
         <Text style={styles.username}>@{user.username}</Text>
         <Text style={styles.status}>{user.bio ?? 'Hey there! I am using chat-app.'}</Text>
-        <Text style={styles.subStatus}>{formatLastSeen(user.lastSeenAt)}</Text>
+        <Text style={styles.subStatus}>{selfOnline ? 'online' : formatLastSeen(user.lastSeenAt)}</Text>
       </View>
 
       <Pressable

@@ -61,7 +61,7 @@ export function formatLastSeen(iso: string | null): string {
   const now = new Date();
   const diffMs = now.getTime() - d.getTime();
   const mins = Math.floor(diffMs / 60_000);
-  if (mins < 1) return 'online';
+  if (mins < 1) return 'last seen just now';
   if (mins < 60) return `last seen ${mins} min ago`;
   const hours = Math.floor(mins / 60);
   if (hours < 24) return `last seen ${hours} hour${hours > 1 ? 's' : ''} ago`;
@@ -90,6 +90,9 @@ export function previewText(type: string, text: string | null, senderName?: stri
       return `${prefix}GIF`;
     case 'file':
       return `${prefix}Document`;
+    case 'call':
+      // Server-authored call logs ("Voice call · 00:42") carry their own text.
+      return text ?? 'Call';
     case 'system':
       // Server-authored notices ("X has left the chat") never take a sender
       // prefix — the name is already in the text.

@@ -458,6 +458,23 @@ async function migrationV12(db: SQLite.SQLiteDatabase): Promise<void> {
   ]);
 }
 
+/**
+ * Migration 13 — status replies + call-log message metadata.
+ *
+ * Messages can now quote a status (WhatsApp "reply to status") and carry the
+ * metadata of a voice/video call rendered as a centered call-log row. Uses
+ * `ensureColumns` only — a `repairSchema` pass here would DROP the messages
+ * table (missing the new canonical columns) and wipe every cached chat.
+ */
+async function migrationV13(db: SQLite.SQLiteDatabase): Promise<void> {
+  await ensureColumns(db, 'messages', [
+    ['status_reply_to', 'TEXT'],
+    ['call_type', 'TEXT'],
+    ['call_duration_ms', 'INTEGER'],
+    ['call_status', 'TEXT'],
+  ]);
+}
+
 const MIGRATIONS: MigrationStep[] = [
   MIGRATION_V1,
   migrationV2,
@@ -471,6 +488,7 @@ const MIGRATIONS: MigrationStep[] = [
   migrationV10,
   migrationV11,
   migrationV12,
+  migrationV13,
 ];
 
 async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {

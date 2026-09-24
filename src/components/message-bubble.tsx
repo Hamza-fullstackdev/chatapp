@@ -139,6 +139,8 @@ interface MessageBubbleProps {
   showSenderName?: boolean;
   senderName?: string;
   replyPreview?: { senderId: string; senderName?: string | null; text: string | null; type: string } | null;
+  /** WhatsApp-style "reply to status" quote shown above the message content. */
+  statusReplyPreview?: { authorName: string; text: string; type: string } | null;
   onFailedRetry?: () => void;
   onLongPress?: (message: MessageDTO) => void;
   onOpenMedia?: (attachment: AttachmentDTO) => void;
@@ -389,6 +391,7 @@ export function MessageBubble({
   showSenderName,
   senderName,
   replyPreview,
+  statusReplyPreview,
   onFailedRetry,
   onLongPress,
   onOpenMedia,
@@ -555,6 +558,28 @@ export function MessageBubble({
         </View>
       )}
 
+      {statusReplyPreview && (
+        <View style={styles.statusReplyBox}>
+          <Text style={[styles.statusReplySender, { color: colors.brand }]} numberOfLines={1}>
+            {statusReplyPreview.authorName}
+          </Text>
+          <View style={styles.statusReplyQuote}>
+            <Text style={styles.statusReplyTitle} numberOfLines={1}>
+              Status update
+            </Text>
+            <Text style={[styles.replyText, { color: colors.textSecondary }]} numberOfLines={2}>
+              {statusReplyPreview.type === 'text'
+                ? statusReplyPreview.text
+                : statusReplyPreview.type === 'image'
+                  ? 'Photo'
+                  : statusReplyPreview.type === 'video'
+                    ? 'Video'
+                    : 'Media'}
+            </Text>
+          </View>
+        </View>
+      )}
+
       {message.deletedAt ? (
         <View style={styles.deletedRow}>
           <Ionicons name="trash-outline" size={15} color={colors.textSecondary} />
@@ -691,6 +716,26 @@ const styles = StyleSheet.create({
   replyText: {
     fontSize: 13,
     marginTop: 1,
+  },
+  statusReplyBox: {
+    marginBottom: 5,
+    marginTop: 1,
+  },
+  statusReplySender: {
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  statusReplyQuote: {
+    borderLeftWidth: 3,
+    borderLeftColor: '#25D366',
+    paddingLeft: 8,
+    borderRadius: 2,
+  },
+  statusReplyTitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#25D366',
   },
   deletedRow: {
     flexDirection: 'row',

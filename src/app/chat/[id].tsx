@@ -39,7 +39,8 @@ import { enqueueOp, useSyncDb, useSyncFlush } from '@/context/sync-context';
 import { setActiveConversationId } from '@/lib/active-conversation';
 import { conversationsApi, messagesApi, stickersApi } from '@/lib/api';
 import { ApiError } from '@/lib/api-client';
-import { formatLastSeen } from '@/lib/format';
+import { formatConversationTime, formatLastSeen } from '@/lib/format';
+import { usePresence } from '@/lib/presence';
 import { joinConversation, leaveConversation, sendMessageRead, sendTyping } from '@/lib/socket';
 import { getDb } from '@/db/database';
 import {
@@ -61,6 +62,7 @@ import {
   saveConversationMembers as persistConversationMembers,
   setConversationMeta as persistConversationMeta,
   setConversationLeftAt as persistConversationLeftAt,
+  listStatuses,
   type StoredProfile,
 } from '@/db/repositories';
 import { notifyLocalDb } from '@/lib/local-db-events';
@@ -79,6 +81,7 @@ import type {
   MessageDTO,
   MessageDeliveredEvent,
   MessageReadEvent,
+  StatusDTO,
   TypingUpdateEvent,
 } from '@/types/api';
 
@@ -163,6 +166,10 @@ function attachToDto(
     type: draft.type ?? (draft.attachment ? draft.attachment.type : 'text'),
     text: draft.text ?? null,
     replyTo: draft.replyTo ?? null,
+    statusReplyTo: null,
+    callType: null,
+    callDurationMs: null,
+    callStatus: null,
     status,
     createdAt: new Date().toISOString(),
     editedAt: null,
@@ -212,6 +219,8 @@ export default function ChatScreen() {
   // Offline identity cache: sender names resolve from SQLite so group chats
   // render correctly even when the detail API call fails.
   const [profiles, setProfiles] = useState<Map<string, StoredProfile>>(new Map());
+  // Local statuses, keyed by id — "reply to status" quotes resolve from here.
+  const [statusesById, setStatusesById] = useState<Map<string, StatusDTO>>(new Map());
 
   const [replyTarget, setReplyTarget] = useState<MessageDTO | null>(null);
   const [editTarget, setEditTarget] = useState<MessageDTO | null>(null);
@@ -360,6 +369,9 @@ export default function ChatScreen() {
     ? (detail?.members.some((m) => m.id === myId && m.role === 'admin') ?? false)
     : false;
   const otherUserId = conv?.otherUserId ?? null;
+  // WhatsApp-style: show live "online" while the peer's socket is present,
+  // falling back to their last-seen time otherwise.
+  const presence = usePresence();
 
   const messageById = useMemo(() => {
     const map = new Map<string, MessageDTO>();
@@ -387,7 +399,9 @@ export default function ChatScreen() {
     : conv?.otherUserName ?? 'Chat';
   const subtitle = isGroup
     ? `${detail?.members.length ?? 0} members`
-    : formatLastSeen(otherUserId ? (profiles.get(otherUserId)?.lastSeenAt ?? null) : null);
+    : otherUserId && presence.has(otherUserId)
+      ? 'online'
+      : formatLastSeen(otherUserId ? (profiles.get(otherUserId)?.lastSeenAt ?? null) : null);
 
   // Tap the header name (or DP / ⋮) to open the peer's profile; groups open
   // their info screen.
@@ -556,6 +570,15 @@ export default function ChatScreen() {
       setProfiles(map);
     })();
   }, [base, detail]);
+
+  // Load the local status cache once so "reply to status" quotes render.
+  useEffect(() => {
+    void (async () => {
+      const db = await getDb();
+      const all = await listStatuses(db);
+      setStatusesById(new Map(all.map((s) => [s.id, s])));
+    })();
+  }, []);
 
   // Mark everything visible as read when the conversation opens. Read
   // receipts are only ever sent for the newest *incoming* message — never
@@ -1879,7 +1902,36 @@ export default function ChatScreen() {
                 </View>
               );
             }
+            // Call logs (WhatsApp "Voice call · 3:42" rows) render centered,
+            // not as a user bubble. Use the last status date as its timestamp.
+            if (item.type === 'call') {
+              const missed = item.callStatus === 'missed';
+              const outgoing = item.senderId === myId;
+              const accent = missed ? '#E5423D' : colors.brand;
+              return (
+                <View style={styles.systemRow}>
+                  <View style={styles.callRow}>
+                    <Ionicons
+                      name={outgoing ? 'arrow-up-right-box' : 'arrow-down-left-box'}
+                      size={16}
+                      color={accent}
+                    />
+                    <Text style={[styles.callRowText, { color: colors.text }]}>
+                      {item.text ?? 'Call'}
+                    </Text>
+                  </View>
+                  <Text style={[styles.systemTime, { color: colors.textSecondary }]}>
+                    {formatConversationTime(item.createdAt)}
+                  </Text>
+                </View>
+              );
+            }
             const ref = item.replyTo ? messageById.get(item.replyTo) ?? null : null;
+            const refStatus = item.statusReplyTo ? statusesById.get(item.statusReplyTo) ?? null : null;
+            const refStatusAuthor =
+              refStatus && refStatus.userId === myId
+                ? 'You'
+                : profiles.get(refStatus?.userId ?? '')?.fullName;
             return (
               <MessageBubble
                 message={item}
@@ -1899,6 +1951,15 @@ export default function ChatScreen() {
                               detail?.members.find((m) => m.id === ref.senderId)?.name,
                         text: ref.text,
                         type: ref.type,
+                      }
+                    : undefined
+                }
+                statusReplyPreview={
+                  refStatus
+                    ? {
+                        authorName: refStatusAuthor ?? 'Status',
+                        text: refStatus.text ?? '',
+                        type: refStatus.type,
                       }
                     : undefined
                 }
@@ -2707,6 +2768,19 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontStyle: 'italic',
     textAlign: 'center',
+  },
+  systemTime: {
+    fontSize: 11,
+    marginTop: 3,
+  },
+  callRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  callRowText: {
+    fontSize: 14,
+    fontWeight: '600',
   },
   inputBar: {
     flexDirection: 'row',

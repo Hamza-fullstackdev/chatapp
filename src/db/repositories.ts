@@ -409,6 +409,10 @@ type MessageRow = {
   type: string;
   text: string | null;
   reply_to: string | null;
+  status_reply_to: string | null;
+  call_type: string | null;
+  call_duration_ms: number | null;
+  call_status: string | null;
   status: string;
   created_at: string;
   edited_at: string | null;
@@ -465,6 +469,10 @@ function rowToMessage(row: MessageRow, attachments: AttachmentDTO[], reactions: 
     type: row.type,
     text: row.text,
     replyTo: row.reply_to,
+    statusReplyTo: row.status_reply_to,
+    callType: row.call_type,
+    callDurationMs: row.call_duration_ms,
+    callStatus: row.call_status,
     status: row.status,
     createdAt: row.created_at,
     editedAt: row.edited_at,
@@ -475,12 +483,38 @@ function rowToMessage(row: MessageRow, attachments: AttachmentDTO[], reactions: 
   };
 }
 
+/**
+ * Parent-guard for `upsertMessage`: the local `messages` table has a foreign
+ * key on `conversation_id`, so a message pushed for a conversation we haven't
+ * cached yet (a first-ever status reply, an incoming call log, etc.) would be
+ * rejected outright. Insert a minimal private row up front — the real data
+ * gets filled in by `refreshConversationFromMessage` right after.
+ */
+async function ensureConversationParent(
+  db: SQLiteDatabase,
+  message: Pick<MessageDTO, 'conversationId' | 'createdAt'>,
+): Promise<void> {
+  const existing = await db.getFirstAsync<{ id: string }>(
+    'SELECT id FROM conversations WHERE id = ?',
+    message.conversationId,
+  );
+  if (existing) return;
+  await db.runAsync(
+    `INSERT OR IGNORE INTO conversations (id, type, updated_at)
+     VALUES (?, 'private', ?)`,
+    message.conversationId,
+    message.createdAt,
+  );
+}
+
 export async function upsertMessage(db: SQLiteDatabase, message: MessageDTO): Promise<void> {
+  await ensureConversationParent(db, message);
   await db.runAsync(
     `INSERT OR REPLACE INTO messages (
       id, client_message_id, conversation_id, sender_id, type, text, reply_to,
+      status_reply_to, call_type, call_duration_ms, call_status,
       status, created_at, edited_at, deleted_at, has_attachments
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     message.id,
     message.clientMessageId,
     message.conversationId,
@@ -488,6 +522,10 @@ export async function upsertMessage(db: SQLiteDatabase, message: MessageDTO): Pr
     message.type,
     message.text,
     message.replyTo,
+    message.statusReplyTo,
+    message.callType,
+    message.callDurationMs,
+    message.callStatus,
     message.status,
     message.createdAt,
     message.editedAt,
@@ -686,6 +724,14 @@ export async function setMessageReactions(
   messageId: string,
   reactions: ReactionDTO[],
 ): Promise<void> {
+  // `message_reactions.message_id` has a foreign key on messages; a reaction
+  // that lands before the message row itself (out-of-order sync) is dropped —
+  // the next message update / sync pass will reconcile it.
+  const parent = await db.getFirstAsync<{ id: string }>(
+    'SELECT id FROM messages WHERE id = ?',
+    messageId,
+  );
+  if (!parent) return;
   await db.runAsync('DELETE FROM message_reactions WHERE message_id = ?', messageId);
   for (const r of reactions) {
     await db.runAsync(
@@ -1390,6 +1436,13 @@ export async function refreshConversationFromMessage(
     (existing.last_message_id === message.id || existing.last_message_id === message.clientMessageId);
   const updates: string[] = [];
   const params: (string | number | null)[] = [];
+
+  // `ensureConversationParent` can pre-create a bare row without the peer
+  // identity; backfill it here so the Chats tab can render the chat title.
+  if (existing.type === 'private' && incoming && existing.other_user_id !== message.senderId) {
+    updates.push('other_user_id = ?');
+    params.push(message.senderId);
+  }
 
   if (isNewer || isDeliveredPending) {
     updates.push(

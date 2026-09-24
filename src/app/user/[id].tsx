@@ -19,6 +19,7 @@ import { getDb } from '@/db/database';
 import { getUserProfile, upsertUserProfile } from '@/db/repositories';
 import { Avatar } from '@/components/avatar';
 import { formatLastSeen } from '@/lib/format';
+import { usePresence } from '@/lib/presence';
 import type { FriendshipStatus, UserDTO } from '@/types/api';
 
 export default function UserProfileScreen() {
@@ -143,7 +144,7 @@ export default function UserProfileScreen() {
           : { handler: sendRequest, label: 'Add friend', icon: 'person-add' as const };
 
   const showName = profile?.fullName ?? '';
-  const online = false;
+  const online = usePresence().has(userId);
 
   return (
     <SafeAreaView edges={['top', 'bottom']} style={[styles.safe, { backgroundColor: colors.background }]}>
@@ -178,7 +179,7 @@ export default function UserProfileScreen() {
           <Text style={[styles.name, { color: colors.text }]}>{profile.fullName}</Text>
           <Text style={[styles.username, { color: colors.textSecondary }]}>@{profile.username}</Text>
           <Text style={[styles.presence, { color: colors.textSecondary }]}>
-            {online ? 'online' : profile.lastSeenAt ? `last seen ${formatLastSeen(profile.lastSeenAt)}` : 'offline'}
+            {online ? 'online' : profile.lastSeenAt ? formatLastSeen(profile.lastSeenAt) : 'offline'}
           </Text>
 
           <Pressable

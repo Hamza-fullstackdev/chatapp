@@ -2,7 +2,7 @@
 
 # dependencies
 node_modules/
-
+modules/save-to-downloads/android/build
 # Expo
 .expo/
 dist/

@@ -1,11 +1,11 @@
-import { createContext, useCallback, useContext, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useSocketEvent } from '@/context/socket-context';
 import { callsApi } from '@/lib/api';
 import { getDb } from '@/db/database';
 import { upsertCall } from '@/db/repositories';
 import { notifyLocalDb } from '@/lib/local-db-events';
 import { startCallTone, stopCallTone } from '@/lib/call-audio';
-import { isCallScreenActive, openCallScreen } from '@/lib/call-routing';
+import { isCallScreenActive, onCallRouteChange, openCallScreen } from '@/lib/call-routing';
 import type { CallDTO } from '@/types/api';
 
 interface CallContextValue {
@@ -37,6 +37,14 @@ export function CallProvider({ children }: { children: ReactNode }) {
   const [starting, setStarting] = useState(false);
   const [active, setActive] = useState(isCallScreenActive());
   const callStartingRef = useRef(false);
+
+  // Keep `active` tied to the real call-screen route. The server only sockets
+  // the *peer* of a status change, so the user who hangs up/rejects never
+  // receives a `call:ended`-style event — without this their call buttons
+  // stayed disabled after every call they ended themselves.
+  useEffect(() => {
+    return onCallRouteChange(() => setActive(isCallScreenActive()));
+  }, []);
   const persistCall = useCallback((call: CallDTO) => {
     void (async () => {
       const db = await getDb();
@@ -98,6 +106,10 @@ export function CallProvider({ children }: { children: ReactNode }) {
         persistCall(call);
         startCallTone('ringback');
         openCallScreen(call.id, callType);
+      } catch {
+        // No call screen was opened, so release the disabled flag (the guard
+        // below for `isCallScreenActive()` would otherwise stay blocked).
+        setActive(isCallScreenActive());
       } finally {
         callStartingRef.current = false;
         setStarting(false);

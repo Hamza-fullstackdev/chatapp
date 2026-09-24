@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { AppState, type AppStateStatus } from 'react-native';
 import { useAuth } from './auth-context';
 import { connectSocket, disconnectSocket, getSocket } from '@/lib/socket';
 import { installRealtimeHandlers } from '@/lib/realtime-sink';
@@ -18,7 +19,12 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     if (status !== 'signedIn' || !token) return;
 
     const socket = connectSocket(token);
-    const onConnect = () => setConnected(true);
+    const onConnect = () => {
+      setConnected(true);
+      // Back from the background — the server refreshes "last seen" on
+      // connect, but an extra report keeps it honest while the socket lives.
+      socket.emit('presence:report');
+    };
     const onDisconnect = () => {
       setConnected(false);
       clearPresence();
@@ -34,7 +40,21 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       uninstall = installRealtimeHandlers(socket, userId);
     }
 
+    // WhatsApp-style presence: on foreground report "here", on background
+    // persist "last seen now" so peers don't see a stale timestamp.
+    const onAppState = (next: AppStateStatus) => {
+      const s = getSocket();
+      if (!s) return;
+      if (next === 'active') {
+        s.emit('presence:report');
+      } else if (next === 'background' || next === 'inactive') {
+        s.emit('presence:background');
+      }
+    };
+    const appStateSub = AppState.addEventListener('change', onAppState);
+
     return () => {
+      appStateSub.remove();
       uninstall?.();
       socket.off('connect', onConnect);
       socket.off('disconnect', onDisconnect);

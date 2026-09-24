@@ -100,10 +100,10 @@ export function installRealtimeHandlers(socket: Socket, currentUserId: string): 
 
       // Banner the incoming message (WhatsApp-style): skip our own echoes,
       // whatever conversation we are currently reading on screen, and
-      // scripted server notices (e.g. "X has left the chat").
+      // scripted server notices / call-log rows (centered rows, not alerts).
       if (message.senderId === currentUserId) return;
       if (message.conversationId === getActiveConversationId()) return;
-      if (message.type === 'system') return;
+      if (message.type === 'system' || message.type === 'call') return;
       void notifyIncomingMessage(db, message);
     });
   };

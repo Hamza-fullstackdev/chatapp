@@ -1,11 +1,13 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  KeyboardAvoidingView,
   Platform,
   Pressable,
   StyleSheet,
   Text,
+  TextInput,
   View,
   type DimensionValue,
 } from "react-native";
@@ -19,6 +21,7 @@ import {
 import { Image } from "expo-image";
 import { useVideoPlayer, VideoView } from "expo-video";
 import { Avatar } from "@/components/avatar";
+import { StatusViewersSheet } from "@/components/status-viewers-sheet";
 import { useAuth } from "@/context/auth-context";
 import { useWaTheme } from "@/context/theme-context";
 import { statusesApi } from "@/lib/api";
@@ -53,8 +56,12 @@ export default function StatusViewerScreen() {
   const [profiles, setProfiles] = useState<Map<string, StoredProfile>>(
     new Map(),
   );
+  const [viewersVisible, setViewersVisible] = useState(false);
+  const [replyText, setReplyText] = useState("");
+  const [sendingReply, setSendingReply] = useState(false);
+  const [replyToast, setReplyToast] = useState<string | null>(null);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     const db = await getDb();
     const all = await listStatuses(db);
     if (params.mine === "1") {
@@ -67,11 +74,13 @@ export default function StatusViewerScreen() {
       const queue = buildStatusQueue(all, startingStatus?.userId);
       setStatuses(queue);
     }
-  };
+  }, [params.mine, user?.id, currentId]);
 
-  useFocusEffect(() => {
-    void refresh();
-  });
+  useFocusEffect(
+    useCallback(() => {
+      void refresh();
+    }, [refresh]),
+  );
 
   useEffect(() => {
     const idx = statuses.findIndex((s) => s.id === currentId);
@@ -133,10 +142,46 @@ export default function StatusViewerScreen() {
   }, [current]);
 
   const goBack = () => {
-    if (router.canGoBack()) {
-      router.back();
+    if (router.canDismiss()) {
+      router.dismiss();
     } else {
       router.replace("/");
+    }
+  };
+
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flashReplyToast = (text: string) => {
+    setReplyToast(text);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setReplyToast(null), 1600);
+  };
+
+  // Open the "seen by" sheet — pause playback while it is up, resume on close.
+  const openViewers = () => {
+    setPaused(true);
+    setViewersVisible(true);
+  };
+  const closeViewers = () => {
+    setViewersVisible(false);
+    setPaused(false);
+  };
+
+  // Reply from the status viewer (WhatsApp-style): the text/emoji lands as a
+  // chat message in your conversation with the author, quoting the status.
+  const sendReply = async (raw: string) => {
+    const text = raw.trim();
+    if (!text || !current || sendingReply) return;
+    setSendingReply(true);
+    setReplyText("");
+    try {
+      await statusesApi.reply(current.id, text);
+      flashReplyToast("Sent reply");
+    } catch (e) {
+      setReplyText(text);
+      flashReplyToast(e instanceof Error ? e.message : "Could not send");
+    } finally {
+      setSendingReply(false);
     }
   };
 
@@ -271,12 +316,7 @@ export default function StatusViewerScreen() {
           {isMine && (
             <Pressable
               hitSlop={8}
-              onPress={() =>
-                router.push({
-                  pathname: "/status/viewers",
-                  params: { id: current.id },
-                })
-              }
+              onPress={openViewers}
               style={styles.headerBtn}
             >
               <Ionicons name='eye-outline' size={22} color='#FFFFFF' />
@@ -335,16 +375,75 @@ export default function StatusViewerScreen() {
           />
         </View>
 
+        {/* Reply to the author (others' statuses only). Focus pauses playback,
+            blur resumes it — same contract as holding the screen. */}
+        {!isMine && current && (
+          <KeyboardAvoidingView
+            behavior={Platform.OS === "ios" ? "padding" : undefined}
+            style={styles.replyArea}
+          >
+            {replyToast && (
+              <View style={styles.replyToast}>
+                <Text style={styles.replyToastText}>{replyToast}</Text>
+              </View>
+            )}
+            <View style={styles.reactionRow}>
+              {["\u2764\uFE0F", "\uD83D\uDC4D", "\uD83D\uDE4F", "\uD83D\uDE02", "\uD83D\uDE0E", "\uD83D\uDE23"].map(
+                (emoji) => (
+                  <Pressable
+                    key={emoji}
+                    hitSlop={6}
+                    disabled={sendingReply}
+                    onPress={() => void sendReply(emoji)}
+                    style={({ pressed }) => [
+                      styles.reactionBtn,
+                      pressed && { opacity: 0.5 },
+                    ]}
+                  >
+                    <Text style={styles.reactionEmoji}>{emoji}</Text>
+                  </Pressable>
+                ),
+              )}
+            </View>
+            <View style={styles.replyRow}>
+              <TextInput
+                style={styles.replyInput}
+                value={replyText}
+                onChangeText={setReplyText}
+                placeholder={`Reply to ${authorName}`}
+                placeholderTextColor='rgba(255,255,255,0.55)'
+                maxLength={1000}
+                multiline={false}
+                onFocus={() => setPaused(true)}
+                onBlur={() => setPaused(false)}
+                onSubmitEditing={() => {
+                  if (replyText.trim()) void sendReply(replyText);
+                }}
+                returnKeyType='send'
+              />
+              <Pressable
+                onPress={() => void sendReply(replyText)}
+                disabled={sendingReply || !replyText.trim()}
+                style={[
+                  styles.sendBtn,
+                  (sendingReply || !replyText.trim()) && { opacity: 0.5 },
+                ]}
+              >
+                {sendingReply ? (
+                  <ActivityIndicator size='small' color='#FFFFFF' />
+                ) : (
+                  <Ionicons name='send' size={18} color='#FFFFFF' />
+                )}
+              </Pressable>
+            </View>
+          </KeyboardAvoidingView>
+        )}
+
         <View style={styles.footer}>
           {isMine ? (
             <>
               <Pressable
-                onPress={() =>
-                  router.push({
-                    pathname: "/status/viewers",
-                    params: { id: current.id },
-                  })
-                }
+                onPress={openViewers}
                 style={[
                   styles.footerBtn,
                   { borderColor: "rgba(255,255,255,0.4)" },
@@ -368,6 +467,12 @@ export default function StatusViewerScreen() {
             </>
           ) : null}
         </View>
+
+        <StatusViewersSheet
+          statusId={isMine ? current?.id ?? null : null}
+          visible={viewersVisible}
+          onClose={closeViewers}
+        />
       </SafeAreaView>
     </View>
   );
@@ -492,5 +597,58 @@ const styles = StyleSheet.create({
     top: 0,
     bottom: 0,
     width: "30%",
+  },
+  replyArea: {
+    paddingHorizontal: 12,
+    paddingBottom: 12,
+    zIndex: 4,
+  },
+  replyToast: {
+    alignSelf: "center",
+    backgroundColor: "rgba(0,0,0,0.55)",
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    marginBottom: 8,
+  },
+  replyToastText: { color: "#FFFFFF", fontSize: 13 },
+  reactionRow: {
+    flexDirection: "row",
+    justifyContent: "center",
+    gap: 6,
+    marginBottom: 8,
+  },
+  reactionBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: "rgba(0,0,0,0.35)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  reactionEmoji: { fontSize: 18 },
+  replyRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  replyInput: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.35)",
+    borderRadius: 20,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    color: "#FFFFFF",
+    fontSize: 15,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.25)",
+  },
+  sendBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: "#008069",
+    alignItems: "center",
+    justifyContent: "center",
   },
 });

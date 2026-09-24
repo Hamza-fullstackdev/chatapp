@@ -259,6 +259,9 @@ export const statusesApi = {
   markViewed(id: string): Promise<{ ok: boolean }> {
     return http.post<{ ok: boolean }>(`/api/statuses/${id}/viewed`);
   },
+  reply(id: string, text: string): Promise<{ message: MessageDTO }> {
+    return http.post<{ message: MessageDTO }>(`/api/statuses/${id}/reply`, { text });
+  },
   remove(id: string): Promise<{ ok: boolean }> {
     return http.delete<{ ok: boolean }>(`/api/statuses/${id}`);
   },
